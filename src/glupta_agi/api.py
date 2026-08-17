@@ -9,11 +9,12 @@ from dbos import DBOS, SetWorkflowID
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from .contracts import EvidenceBriefRequest, EvidenceBriefResponse
+from .effects import AmbiguousEffectError
 from .intake import IntakeError, load_request
 from .settings import Settings, SettingsError
 from .workflow import BriefGenerationError, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.1.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version="0.2.0", docs_url=None, redoc_url=None)
 
 
 @lru_cache(maxsize=1)
@@ -72,7 +73,6 @@ async def evidence_brief(
             payload,
             workflow_id,
             str(settings.artifact_root),
-            str(settings.codex_binary),
             str(settings.codex_home),
             settings.codex_model,
         )
@@ -86,6 +86,8 @@ async def evidence_brief(
 
     try:
         result = await handle.get_result()
+    except AmbiguousEffectError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except BriefGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return EvidenceBriefResponse.model_validate(result)

@@ -13,8 +13,8 @@ only the supplied sources. Do not invent facts. Every factual assertion in the
 answer must be supported by at least one citation. Quote exact source text and use
 1-based inclusive line ranges. Put missing, conflicting, or weak evidence in
 uncertainties. Provide only decisions that follow from the evidence. You have no
-tools and may not request or cause external effects."""
-
+tools and may not request or cause external effects. Return citations only in the
+citations field; do not add citation labels or markers to any prose field."""
 
 def build_user_prompt(question: str, sources: Sequence[Mapping[str, object]]) -> str:
     blocks = [f"QUESTION\n{question}\n"]

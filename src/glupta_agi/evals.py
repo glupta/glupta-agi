@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,12 +16,8 @@ from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorCont
 
 from .brief import build_user_prompt
 from .contracts import EvidenceBrief
-from .settings import (
-    PINNED_CODEX_BINARY,
-    PINNED_CODEX_HOME,
-    PINNED_CODEX_MODEL,
-    _validate_codex_runtime,
-)
+from .effects import initialize
+from .settings import PINNED_CODEX_MODEL, Settings
 from .workflow import _run_codex
 
 
@@ -133,15 +130,23 @@ def load_dataset(
 
 
 def run_eval(dataset: Dataset[EvalInput, EvidenceBrief, EvalExpected]) -> Any:
-    _validate_codex_runtime(PINNED_CODEX_BINARY, PINNED_CODEX_HOME)
+    settings = Settings.from_environment()
+    initialize(settings.dbos_system_database_url())
 
     def generate(item: EvalInput) -> EvidenceBrief:
         return _run_codex(
             build_user_prompt(item.question, item.sources),
             item.sources,
-            str(PINNED_CODEX_BINARY),
-            str(PINNED_CODEX_HOME),
+            str(settings.codex_home),
             PINNED_CODEX_MODEL,
+            f"crawl-eval-{uuid.uuid4().hex}",
+            hashlib.sha256(
+                json.dumps(
+                    {"question": item.question, "sources": item.sources},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
         )
 
     return dataset.evaluate_sync(

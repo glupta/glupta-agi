@@ -14,10 +14,14 @@ def main() -> None:
     settings = Settings.from_environment()
     config: DBOSConfig = {
         "name": "glupta-agi-crawl",
-        "application_version": "0.1.0",
+        "application_version": "0.2.0",
         "system_database_url": settings.dbos_system_database_url(),
     }
     DBOS(config=config)
+
+    from .effects import initialize
+
+    initialize(config["system_database_url"])
 
     # Import after DBOS is configured so workflow decorators register against
     # the initialized local runtime.

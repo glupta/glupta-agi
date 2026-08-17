@@ -1,6 +1,45 @@
 name: glupta-crawl
 
 services:
+  app:
+    build: .
+    restart: unless-stopped
+    user: "${GLUPTA_UID:-501}:${GLUPTA_GID:-20}"
+    environment:
+      GLUPTA_INPUT_ROOT: /data/inputs
+      GLUPTA_ARTIFACT_ROOT: /data/artifacts
+      GLUPTA_INTAKE_TOKEN_FILE: /run/private/intake-token
+      GLUPTA_POSTGRES_PASSWORD_FILE: /run/private/postgres-password
+      GLUPTA_POSTGRES_HOST: postgres
+      GLUPTA_POSTGRES_PORT: 5432
+      GLUPTA_CODEX_HOME: /run/codex
+      GLUPTA_HOST: 0.0.0.0
+      GLUPTA_PORT: 8080
+    volumes:
+      - ${GLUPTA_INPUT_DIR:-./inputs}:/data/inputs:ro
+      - ${GLUPTA_RUNTIME_DIR:-./runtime}/artifacts:/data/artifacts
+      - ${GLUPTA_RUNTIME_DIR:-./runtime}/intake-token:/run/private/intake-token:ro
+      - ${GLUPTA_RUNTIME_DIR:-./runtime}/postgres-password:/run/private/postgres-password:ro
+      - ${GLUPTA_SECONDARY_CODEX_HOME:?set GLUPTA_SECONDARY_CODEX_HOME}:/run/codex
+    ports:
+      - 127.0.0.1:${GLUPTA_PORT:-8765}:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - private
+
   postgres:
     image: postgres:17.6-bookworm
     restart: unless-stopped
@@ -12,8 +51,6 @@ services:
       - postgres-password
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - 127.0.0.1:55432:5432
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U glupta -d glupta"]
       interval: 3s
@@ -24,7 +61,7 @@ services:
 
 secrets:
   postgres-password:
-    file: ./runtime/postgres-password
+    file: ${GLUPTA_RUNTIME_DIR:-./runtime}/postgres-password
 
 volumes:
   postgres-data:
