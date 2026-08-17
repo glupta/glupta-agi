@@ -41,12 +41,13 @@ class CodexBriefTests(unittest.TestCase):
             [{"path": "compose.txt", "content": "services:"}],
             "/Users/glupta/.local/bin/codex",
             "/Users/glupta/.codex-secondary",
-            "gpt-5.4-mini",
+            "gpt-5.6-sol",
         )
 
         call = run.call_args  # type: ignore[attr-defined]
         command = call.args[0]
         self.assertIn("--ephemeral", command)
+        self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("features.shell_tool=false", command)
         self.assertEqual(call.kwargs["env"]["CODEX_HOME"], "/Users/glupta/.codex-secondary")
         self.assertEqual(result.citations[0].quote, "services:")
@@ -63,5 +64,5 @@ class CodexBriefTests(unittest.TestCase):
                 [{"path": "compose.txt", "content": "services:"}],
                 "/Users/glupta/.local/bin/codex",
                 "/Users/glupta/.codex-secondary",
-                "gpt-5.4-mini",
+                "gpt-5.6-sol",
             )

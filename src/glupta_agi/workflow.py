@@ -43,6 +43,8 @@ def _run_codex(
             "-c",
             'approval_policy="never"',
             "-c",
+            'model_reasoning_effort="medium"',
+            "-c",
             "features.shell_tool=false",
             "-c",
             "features.remote_plugin=false",
