@@ -46,7 +46,6 @@ def _validate_codex_runtime(home: Path) -> None:
 @dataclass(frozen=True)
 class Settings:
     input_root: Path
-    artifact_root: Path
     token: str
     codex_home: Path = DEFAULT_CODEX_HOME
     codex_model: str = PINNED_CODEX_MODEL
@@ -64,7 +63,6 @@ class Settings:
             raise SettingsError("Crawl must use the pinned Codex model")
         return cls(
             input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/inputs")),
-            artifact_root=Path(os.environ.get("GLUPTA_ARTIFACT_ROOT", "/artifacts")),
             token=token,
             codex_home=codex_home,
             codex_model=codex_model,

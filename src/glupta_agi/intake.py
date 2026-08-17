@@ -36,15 +36,20 @@ class CanonicalRequest:
     question: str
     sources: tuple[SourceDocument, ...]
     request_digest: str
-    write_artifacts: bool
 
     def workflow_payload(self) -> dict[str, object]:
         return {
             "question": self.question,
             "sources": [asdict(source) for source in self.sources],
             "request_digest": self.request_digest,
-            "write_artifacts": self.write_artifacts,
         }
+
+    def matches_recorded_payload(self, recorded: object) -> bool:
+        if not isinstance(recorded, dict):
+            return False
+        return recorded.get("question") == self.question and recorded.get("sources") == [
+            asdict(source) for source in self.sources
+        ]
 
 
 def _validate_relative_path(raw: str) -> tuple[str, ...]:
@@ -116,7 +121,6 @@ def load_request(
     input_root: Path,
     question: str,
     selected_paths: Iterable[str],
-    write_artifacts: bool = False,
 ) -> CanonicalRequest:
     normalized_question = question.strip()
     if not normalized_question:
@@ -165,7 +169,6 @@ def load_request(
             {"path": item.path, "sha256": item.sha256, "byte_size": item.byte_size}
             for item in sources
         ],
-        "write_artifacts": bool(write_artifacts),
     }
     encoded = json.dumps(
         digest_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -174,5 +177,4 @@ def load_request(
         question=normalized_question,
         sources=tuple(sources),
         request_digest=hashlib.sha256(encoded).hexdigest(),
-        write_artifacts=bool(write_artifacts),
     )

@@ -5,6 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from glupta_agi.contracts import EvidenceBriefRequest
 from glupta_agi.intake import IntakeError, load_request
 
 
@@ -32,6 +35,27 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(one.request_digest, two.request_digest)
         self.assertEqual(one.question, "What changed?")
         self.assertEqual(one.sources[0].lines, ("alpha", "beta"))
+
+    def test_removed_artifact_option_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            EvidenceBriefRequest.model_validate(
+                {"question": "q", "files": ["notes/facts.md"], "write_artifacts": False}
+            )
+
+    def test_legacy_payload_still_matches_for_durable_replay(self) -> None:
+        canonical = load_request(
+            input_root=self.root,
+            question="What changed?",
+            selected_paths=["notes/facts.md"],
+        )
+        legacy = {
+            **canonical.workflow_payload(),
+            "request_digest": "legacy-0.2.0-digest",
+            "write_artifacts": False,
+        }
+
+        self.assertTrue(canonical.matches_recorded_payload(legacy))
+        self.assertFalse(canonical.matches_recorded_payload({**legacy, "question": "other"}))
 
     def test_changed_bytes_change_digest(self) -> None:
         before = load_request(input_root=self.root, question="q", selected_paths=["notes/facts.md"])

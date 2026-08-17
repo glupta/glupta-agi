@@ -17,7 +17,6 @@ from pydantic_ai.durable_exec.dbos import DBOSAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from .artifacts import persist_artifacts as persist_artifact_files
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
 from .contracts import EvidenceBrief
 from .effects import AmbiguousEffectError, hold_unknown, reserve, transition
@@ -217,18 +216,10 @@ _crawl_agent = DBOSAgent(
 )
 
 
-@DBOS.step(retries_allowed=False)
-def persist_artifacts(
-    workflow_id: str, artifact_root: str, result: dict[str, Any], markdown: str
-) -> None:
-    persist_artifact_files(workflow_id, artifact_root, result, markdown)
-
-
 @DBOS.workflow()
 async def evidence_brief_workflow(
     payload: dict[str, Any],
     workflow_id: str,
-    artifact_root: str,
     codex_home: str,
     model_name: str,
 ) -> dict[str, Any]:
@@ -248,6 +239,4 @@ async def evidence_brief_workflow(
         "workflow_id": workflow_id,
         "markdown": markdown,
     }
-    if payload["write_artifacts"]:
-        persist_artifacts(workflow_id, artifact_root, response, markdown)
     return response
