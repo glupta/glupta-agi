@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "ollama", "postgres", "host.docker.internal"})
+LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
+PINNED_CODEX_MODEL = "gpt-5.4-mini"
+PINNED_CODEX_BINARY = Path("/Users/glupta/.local/bin/codex")
+PINNED_CODEX_HOME = Path("/Users/glupta/.codex-secondary")
 
 
 class SettingsError(RuntimeError):
@@ -36,18 +39,11 @@ def _read_private_file(path: Path, *, label: str, maximum_bytes: int) -> str:
     return value
 
 
-def _require_local_url(value: str, *, label: str) -> str:
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in LOCAL_HOSTS
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise SettingsError(f"{label} must use an approved local endpoint")
-    return value
+def _validate_codex_runtime(binary: Path, home: Path) -> None:
+    if binary != PINNED_CODEX_BINARY or not binary.is_file():
+        raise SettingsError("Crawl must use the pinned Codex binary")
+    if home != PINNED_CODEX_HOME or not (home / "auth.json").is_file():
+        raise SettingsError("Crawl must use the configured secondary Codex subscription")
 
 
 @dataclass(frozen=True)
@@ -55,8 +51,9 @@ class Settings:
     input_root: Path
     artifact_root: Path
     token: str
-    ollama_base_url: str
-    ollama_model: str = "qwen3.8:27b"
+    codex_binary: Path = PINNED_CODEX_BINARY
+    codex_home: Path = PINNED_CODEX_HOME
+    codex_model: str = PINNED_CODEX_MODEL
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -64,17 +61,19 @@ class Settings:
         token = _read_private_file(token_path, label="intake capability", maximum_bytes=4096)
         if not 32 <= len(token) <= 4096:
             raise SettingsError("intake capability length is invalid")
-        ollama_base_url = _require_local_url(
-            os.environ.get("GLUPTA_OLLAMA_URL", "http://ollama:11434/v1"),
-            label="Ollama URL",
-        )
-        if urlsplit(ollama_base_url).path.rstrip("/") != "/v1":
-            raise SettingsError("Ollama URL must end at /v1")
+        codex_binary = Path(os.environ.get("GLUPTA_CODEX_BINARY", str(PINNED_CODEX_BINARY)))
+        codex_home = Path(os.environ.get("GLUPTA_CODEX_HOME", str(PINNED_CODEX_HOME)))
+        codex_model = os.environ.get("GLUPTA_CODEX_MODEL", PINNED_CODEX_MODEL)
+        _validate_codex_runtime(codex_binary, codex_home)
+        if codex_model != PINNED_CODEX_MODEL:
+            raise SettingsError("Crawl must use the pinned Codex model")
         return cls(
             input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/inputs")),
             artifact_root=Path(os.environ.get("GLUPTA_ARTIFACT_ROOT", "/artifacts")),
             token=token,
-            ollama_base_url=ollama_base_url,
+            codex_binary=codex_binary,
+            codex_home=codex_home,
+            codex_model=codex_model,
         )
 
     def dbos_system_database_url(self) -> str:

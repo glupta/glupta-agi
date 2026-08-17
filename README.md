@@ -1,7 +1,6 @@
 # glupta agi
 
-Private, public-shaped source repository for Glupta AGI (Artificial Glupta
-Intelligence).
+Small private runtime for Glupta AGI (Artificial Glupta Intelligence).
 
 ## Crawl MVP
 
@@ -14,17 +13,20 @@ Current build state:
 
 - secure intake and request canonicalization are implemented;
 - DBOS owns durable execution and idempotency;
-- Pydantic AI owns the typed, single-pass Ollama route;
-- the only model route is local `qwen3.8:27b`;
-- later model upgrades require a new exact local-artifact amendment;
-- runtime bearer material is read from a mounted file and never persisted;
-- local Docker deployment is supported on loopback only;
-- no live messaging, external effect, or paid service is present.
+- one DBOS step invokes the secondary Codex subscription with a JSON schema;
+- Codex is ephemeral, read-only, tool-disabled, and pinned to `gpt-5.4-mini`;
+- runtime bearer material is read from a private file and never persisted;
+- PostgreSQL and the intake API are exposed on loopback only;
+- no live messaging or action tools are present.
 
-The Crawl acceptance boundary is this repository: one useful local evidence
+Selected file contents are sent to the secondary Codex subscription to generate
+the brief. Only select files that are appropriate to disclose to OpenAI; this
+MVP does not claim local de-identification.
+
+The Crawl acceptance boundary is this repository: one useful durable evidence
 brief, durable workflow state, authenticated loopback intake, explicit local
-files, and no external effects. Later-stage architecture and release controls
-do not block this private MVP.
+files, and no action tools. Later-stage agent architecture does not block this
+private MVP.
 
 ## Developer checks
 
@@ -37,15 +39,22 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## Local deployment
 
-The build may access official package and image registries. Application model
-and database routes are limited to PostgreSQL and the existing host Ollama
-endpoint; the API is published only on `127.0.0.1:8765`.
+PostgreSQL runs in Docker. The application runs on Studio so it can use the
+existing secondary Codex subscription. Both database and intake ports are
+published on loopback only.
 
-Create `inputs/`, then place private mode-`0600` random values at
-`runtime/intake-token` and `runtime/postgres-password`. Start the service with:
+Create `inputs/`, then place private mode-`0600` values at
+`runtime/intake-token` and `runtime/postgres-password`. Start PostgreSQL, then
+run the app in a named Studio `tmux` session:
 
 ```sh
-docker compose up --build -d
+docker compose up -d --remove-orphans
+tmux new-session -d -s glupta-crawl \
+  "GLUPTA_INPUT_ROOT=$PWD/inputs GLUPTA_ARTIFACT_ROOT=$PWD/runtime/artifacts \
+   GLUPTA_INTAKE_TOKEN_FILE=$PWD/runtime/intake-token \
+   GLUPTA_POSTGRES_PASSWORD_FILE=$PWD/runtime/postgres-password \
+   GLUPTA_POSTGRES_HOST=127.0.0.1 GLUPTA_POSTGRES_PORT=55432 GLUPTA_PORT=8765 \
+   uv run glupta-agi"
 curl --fail http://127.0.0.1:8765/healthz
 ```
 

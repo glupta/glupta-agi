@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from .contracts import EvidenceBriefRequest, EvidenceBriefResponse
 from .intake import IntakeError, load_request
 from .settings import Settings, SettingsError
-from .workflow import evidence_brief_workflow
+from .workflow import BriefGenerationError, evidence_brief_workflow
 
 app = FastAPI(title="glupta agi", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -43,7 +43,7 @@ def _workflow_id(raw: str | None) -> str:
 
 @app.get("/healthz")
 async def health() -> dict[str, str]:
-    return {"status": "healthy", "stage": "Crawl", "effects": "disabled"}
+    return {"status": "healthy", "stage": "Crawl", "actions": "disabled"}
 
 
 @app.post("/v1/evidence-brief", response_model=EvidenceBriefResponse)
@@ -72,8 +72,9 @@ async def evidence_brief(
             payload,
             workflow_id,
             str(settings.artifact_root),
-            settings.ollama_base_url,
-            settings.ollama_model,
+            str(settings.codex_binary),
+            str(settings.codex_home),
+            settings.codex_model,
         )
 
     recorded = await DBOS.get_workflow_status_async(workflow_id)
@@ -83,7 +84,10 @@ async def evidence_brief(
     if recorded_args[0].get("request_digest") != canonical.request_digest:
         raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency-Key already binds other input")
 
-    result = await handle.get_result()
+    try:
+        result = await handle.get_result()
+    except BriefGenerationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return EvidenceBriefResponse.model_validate(result)
 
 

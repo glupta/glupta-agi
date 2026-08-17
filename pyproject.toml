@@ -12,7 +12,6 @@ license = {text = "Proprietary"}
 dependencies = [
   "dbos>=2.29,<3",
   "fastapi>=0.141,<1",
-  "pydantic-ai-slim[openai]>=2.30,<3",
   "uvicorn>=0.41,<1",
 ]
 
