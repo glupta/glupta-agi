@@ -11,8 +11,7 @@ from urllib.parse import quote, urlsplit
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
 PINNED_CODEX_MODEL = "gpt-5.6-sol"
-PINNED_CODEX_BINARY = Path("/Users/glupta/.local/bin/codex")
-PINNED_CODEX_HOME = Path("/Users/glupta/.codex-secondary")
+DEFAULT_CODEX_HOME = Path("/run/codex")
 
 
 class SettingsError(RuntimeError):
@@ -39,10 +38,8 @@ def _read_private_file(path: Path, *, label: str, maximum_bytes: int) -> str:
     return value
 
 
-def _validate_codex_runtime(binary: Path, home: Path) -> None:
-    if binary != PINNED_CODEX_BINARY or not binary.is_file():
-        raise SettingsError("Crawl must use the pinned Codex binary")
-    if home != PINNED_CODEX_HOME or not (home / "auth.json").is_file():
+def _validate_codex_runtime(home: Path) -> None:
+    if not home.is_absolute() or not (home / "auth.json").is_file():
         raise SettingsError("Crawl must use the configured secondary Codex subscription")
 
 
@@ -51,8 +48,7 @@ class Settings:
     input_root: Path
     artifact_root: Path
     token: str
-    codex_binary: Path = PINNED_CODEX_BINARY
-    codex_home: Path = PINNED_CODEX_HOME
+    codex_home: Path = DEFAULT_CODEX_HOME
     codex_model: str = PINNED_CODEX_MODEL
 
     @classmethod
@@ -61,17 +57,15 @@ class Settings:
         token = _read_private_file(token_path, label="intake capability", maximum_bytes=4096)
         if not 32 <= len(token) <= 4096:
             raise SettingsError("intake capability length is invalid")
-        codex_binary = Path(os.environ.get("GLUPTA_CODEX_BINARY", str(PINNED_CODEX_BINARY)))
-        codex_home = Path(os.environ.get("GLUPTA_CODEX_HOME", str(PINNED_CODEX_HOME)))
+        codex_home = Path(os.environ.get("GLUPTA_CODEX_HOME", str(DEFAULT_CODEX_HOME)))
         codex_model = os.environ.get("GLUPTA_CODEX_MODEL", PINNED_CODEX_MODEL)
-        _validate_codex_runtime(codex_binary, codex_home)
+        _validate_codex_runtime(codex_home)
         if codex_model != PINNED_CODEX_MODEL:
             raise SettingsError("Crawl must use the pinned Codex model")
         return cls(
             input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/inputs")),
             artifact_root=Path(os.environ.get("GLUPTA_ARTIFACT_ROOT", "/artifacts")),
             token=token,
-            codex_binary=codex_binary,
             codex_home=codex_home,
             codex_model=codex_model,
         )
@@ -80,9 +74,9 @@ class Settings:
         explicit = os.environ.get("DBOS_SYSTEM_DATABASE_URL")
         if explicit:
             parsed = urlsplit(explicit)
-            if parsed.scheme not in {"postgresql", "sqlite"}:
-                raise SettingsError("DBOS system database must be PostgreSQL or SQLite")
-            if parsed.scheme == "postgresql" and parsed.hostname not in LOCAL_HOSTS:
+            if parsed.scheme != "postgresql":
+                raise SettingsError("DBOS system database must be PostgreSQL")
+            if parsed.hostname not in LOCAL_HOSTS:
                 raise SettingsError("DBOS PostgreSQL endpoint must be local")
             return explicit
 

@@ -98,3 +98,29 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_environment()
                 with self.assertRaisesRegex(SettingsError, "must be local"):
                     settings.dbos_system_database_url()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
+                    "DBOS_SYSTEM_DATABASE_URL": "sqlite:///crawl.db",
+                },
+                clear=True,
+            ), patch("glupta_agi.settings._validate_codex_runtime"):
+                settings = Settings.from_environment()
+                with self.assertRaisesRegex(SettingsError, "must be PostgreSQL"):
+                    settings.dbos_system_database_url()
+
+    def test_codex_home_must_be_an_absolute_authenticated_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            token = _private_file(Path(temporary), "token", "t" * 32)
+            with patch.dict(
+                os.environ,
+                {
+                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
+                    "GLUPTA_CODEX_HOME": "relative-codex-home",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(SettingsError, "secondary Codex subscription"):
+                    Settings.from_environment()

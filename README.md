@@ -13,28 +13,34 @@ Current build state:
 
 - secure intake and request canonicalization are implemented;
 - DBOS owns durable execution and idempotency;
-- one DBOS step invokes the secondary Codex subscription with a JSON schema;
-- Codex is ephemeral, read-only, tool-disabled, and pinned to `gpt-5.6-sol`
-  with `medium` reasoning;
+- Pydantic AI's native `DBOSAgent`/`DBOSModel` boundary durably wraps the one
+  typed model request with provider retries disabled;
+- one predeclared `model-0` effect slot fences the external model call before
+  dispatch through a DBOS datasource transaction and fails closed when a crash
+  leaves its outcome ambiguous;
+- the official Codex SDK binds a non-ephemeral thread and turn to that effect;
+  the turn is read-only, web/tool-disabled, clean-environment launched, and
+  pinned to `gpt-5.6-sol` with `medium` reasoning;
 - runtime bearer material is read from a private file and never persisted;
-- PostgreSQL and the intake API are exposed on loopback only;
+- PostgreSQL is not published and the intake API is loopback-only;
 - no live messaging or action tools are present.
 
 Selected file contents are sent to the secondary Codex subscription to generate
 the brief. Only select files that are appropriate to disclose to OpenAI; this
 MVP does not claim local de-identification.
 
-The Crawl acceptance boundary is this repository: one useful durable evidence
-brief, durable workflow state, authenticated loopback intake, explicit local
-files, and no action tools. Later-stage agent architecture does not block this
-private MVP.
+The Crawl acceptance boundary is this repository: one useful durable `OBSERVE`
+brief, durable workflow/effect state, authenticated loopback intake, explicit
+local files, and no action tools. DIRECT, COMPOUND, and EXECUTE remain disabled
+until measured Crawl evidence earns the next Blueprint stage.
 
 ## Quality loop
 
-Pydantic Evals runs the frozen 20-case workload against the same Codex
+Pydantic Evals runs the frozen 20-case workload against the same fenced Codex
 generator used by DBOS. It runs sequentially, prints a report, and saves a
-machine-readable receipt outside git. The four later supervisory roles and the
-Pydantic AI Harness are deliberately not Crawl runtime components.
+machine-readable receipt outside git. Pydantic AI's delegation, programmatic
+hand-off, and graph patterns are complexity levels, not components Crawl must
+install; the single-agent pattern is the only one this stage has earned.
 
 ```sh
 uv run --extra dev python -m glupta_agi.evals --output runtime/evals/latest.json
@@ -45,31 +51,27 @@ task or deterministic assertion makes the command exit non-zero.
 
 ## Developer checks
 
-Core tests use only the Python standard library and can run before dependency
-selection:
-
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+uv run --extra dev ruff check .
+uv run --extra dev pytest -q
+uv lock --check
 ```
 
 ## Local deployment
 
-PostgreSQL runs in Docker. The application runs on Studio so it can use the
-existing secondary Codex subscription. Both database and intake ports are
-published on loopback only.
+The Community profile is exactly one non-root app executor plus PostgreSQL.
+Only the intake port is published, on loopback. The secondary Codex home is a
+runtime mount, not a path embedded in the image or application.
 
-Create `inputs/`, then place private mode-`0600` values at
-`runtime/intake-token` and `runtime/postgres-password`. Start PostgreSQL, then
-run the app in a named Studio `tmux` session:
+Create `inputs/` and `runtime/artifacts/`, then place private mode-`0600`
+values at `runtime/intake-token` and `runtime/postgres-password`. Point the
+deployment-only mount variable at the secondary subscription home and start
+the two-service profile:
 
 ```sh
-docker compose up -d --remove-orphans
-tmux new-session -d -s glupta-crawl \
-  "GLUPTA_INPUT_ROOT=$PWD/inputs GLUPTA_ARTIFACT_ROOT=$PWD/runtime/artifacts \
-   GLUPTA_INTAKE_TOKEN_FILE=$PWD/runtime/intake-token \
-   GLUPTA_POSTGRES_PASSWORD_FILE=$PWD/runtime/postgres-password \
-   GLUPTA_POSTGRES_HOST=127.0.0.1 GLUPTA_POSTGRES_PORT=55432 GLUPTA_PORT=8765 \
-   uv run glupta-agi"
+export GLUPTA_SECONDARY_CODEX_HOME=/absolute/path/to/secondary/codex-home
+export GLUPTA_UID=$(id -u) GLUPTA_GID=$(id -g)
+docker compose up -d --build --remove-orphans
 curl --fail http://127.0.0.1:8765/healthz
 ```
 
