@@ -8,7 +8,7 @@ import tempfile
 from typing import Any
 
 from codex_cli_bin import bundled_codex_path, bundled_path_dir
-from dbos import DBOS
+from dbos import DBOS, Queue
 from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
 from openai_codex.generated.v2_all import ReasoningEffort, WebSearchMode
 from pydantic import BaseModel, ConfigDict
@@ -213,6 +213,12 @@ _crawl_agent = DBOSAgent(
     name="crawl_observe_agent",
     model_step_config={"retries_allowed": False},
     parallel_execution_mode="sequential",
+)
+
+crawl_observe_queue = Queue(
+    "crawl-observe-v1",
+    concurrency=1,
+    worker_concurrency=1,
 )
 
 

@@ -11,7 +11,12 @@ from codex_cli_bin import bundled_codex_path
 from pydantic_ai.durable_exec.dbos import DBOSAgent
 
 from glupta_agi.effects import AmbiguousEffectError, Effect
-from glupta_agi.workflow import BriefGenerationError, _crawl_agent, _run_codex
+from glupta_agi.workflow import (
+    BriefGenerationError,
+    _crawl_agent,
+    _run_codex,
+    crawl_observe_queue,
+)
 
 
 def _effect(state: str, result: dict[str, object] | None = None) -> Effect:
@@ -84,6 +89,11 @@ class FakeClient:
 
 
 class CodexBriefTests(unittest.TestCase):
+    def test_crawl_model_work_is_bounded_by_one_dbos_queue_slot(self) -> None:
+        self.assertEqual(crawl_observe_queue.name, "crawl-observe-v1")
+        self.assertEqual(crawl_observe_queue.concurrency, 1)
+        self.assertEqual(crawl_observe_queue.worker_concurrency, 1)
+
     def test_runtime_uses_native_pydantic_ai_dbos_durability_without_retries(self) -> None:
         self.assertIsInstance(_crawl_agent, DBOSAgent)
         self.assertEqual(_crawl_agent.model.step_config, {"retries_allowed": False})

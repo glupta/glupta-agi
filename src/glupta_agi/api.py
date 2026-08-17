@@ -12,9 +12,9 @@ from .contracts import EvidenceBriefRequest, EvidenceBriefResponse
 from .effects import AmbiguousEffectError
 from .intake import IntakeError, load_request
 from .settings import Settings, SettingsError
-from .workflow import BriefGenerationError, evidence_brief_workflow
+from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.2.1", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version="0.2.2", docs_url=None, redoc_url=None)
 
 
 @lru_cache(maxsize=1)
@@ -67,7 +67,7 @@ async def evidence_brief(
 
     payload = canonical.workflow_payload()
     with SetWorkflowID(workflow_id):
-        handle = await DBOS.start_workflow_async(
+        handle = await crawl_observe_queue.enqueue_async(
             evidence_brief_workflow,
             payload,
             workflow_id,
