@@ -13,7 +13,7 @@ from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
 from openai_codex.generated.v2_all import ReasoningEffort, WebSearchMode
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import Agent
-from pydantic_ai.durable_exec.dbos import DBOSAgent
+from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -203,16 +203,19 @@ def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse
     return ModelResponse(parts=[TextPart(brief.model_dump_json())])
 
 
-_crawl_agent = DBOSAgent(
-    Agent(
-        FunctionModel(_crawl_model, model_name="codex-subscription-adapter"),
-        name="crawl_observe_agent",
-        output_type=EvidenceBrief,
-        retries=0,
-    ),
+_crawl_durability = DBOSDurability(
     name="crawl_observe_agent",
     model_step_config={"retries_allowed": False},
     parallel_execution_mode="sequential",
+    register_legacy_workflows=False,
+)
+
+_crawl_agent = Agent(
+    FunctionModel(_crawl_model, model_name="codex-subscription-adapter"),
+    name="crawl_observe_agent",
+    output_type=EvidenceBrief,
+    retries=0,
+    capabilities=[_crawl_durability],
 )
 
 crawl_observe_queue = Queue(

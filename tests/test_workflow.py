@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from codex_cli_bin import bundled_codex_path
-from pydantic_ai.durable_exec.dbos import DBOSAgent
+from pydantic_ai import Agent
+from pydantic_ai.durable_exec.dbos import DBOSDurability
 
 from glupta_agi.effects import AmbiguousEffectError, Effect
 from glupta_agi.workflow import (
     BriefGenerationError,
     _crawl_agent,
+    _crawl_durability,
     _run_codex,
     crawl_observe_queue,
 )
@@ -95,8 +97,10 @@ class CodexBriefTests(unittest.TestCase):
         self.assertEqual(crawl_observe_queue.worker_concurrency, 1)
 
     def test_runtime_uses_native_pydantic_ai_dbos_durability_without_retries(self) -> None:
-        self.assertIsInstance(_crawl_agent, DBOSAgent)
-        self.assertEqual(_crawl_agent.model.step_config, {"retries_allowed": False})
+        self.assertIsInstance(_crawl_agent, Agent)
+        self.assertIsInstance(_crawl_durability, DBOSDurability)
+        self.assertEqual(_crawl_durability._model_step_config, {"retries_allowed": False})
+        self.assertFalse(_crawl_durability._register_legacy_workflows)
 
     def test_runs_fenced_secondary_codex_without_tools_and_resolves_quote(self) -> None:
         client = FakeClient(
