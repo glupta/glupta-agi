@@ -14,7 +14,8 @@ Current build state:
 - secure intake and request canonicalization are implemented;
 - DBOS owns durable execution and idempotency;
 - one DBOS step invokes the secondary Codex subscription with a JSON schema;
-- Codex is ephemeral, read-only, tool-disabled, and pinned to `gpt-5.4-mini`;
+- Codex is ephemeral, read-only, tool-disabled, and pinned to `gpt-5.6-sol`
+  with `medium` reasoning;
 - runtime bearer material is read from a private file and never persisted;
 - PostgreSQL and the intake API are exposed on loopback only;
 - no live messaging or action tools are present.
@@ -27,6 +28,20 @@ The Crawl acceptance boundary is this repository: one useful durable evidence
 brief, durable workflow state, authenticated loopback intake, explicit local
 files, and no action tools. Later-stage agent architecture does not block this
 private MVP.
+
+## Quality loop
+
+Pydantic Evals runs the frozen 20-case workload against the same Codex
+generator used by DBOS. It runs sequentially, prints a report, and saves a
+machine-readable receipt outside git. The four later supervisory roles and the
+Pydantic AI Harness are deliberately not Crawl runtime components.
+
+```sh
+uv run --extra dev python -m glupta_agi.evals --output runtime/evals/latest.json
+```
+
+Use `--case EV-001-single-source` or `--limit 1` for a bounded probe. A failed
+task or deterministic assertion makes the command exit non-zero.
 
 ## Developer checks
 

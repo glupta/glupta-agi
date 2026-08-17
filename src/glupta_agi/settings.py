@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
-PINNED_CODEX_MODEL = "gpt-5.4-mini"
+PINNED_CODEX_MODEL = "gpt-5.6-sol"
 PINNED_CODEX_BINARY = Path("/Users/glupta/.local/bin/codex")
 PINNED_CODEX_HOME = Path("/Users/glupta/.codex-secondary")
 

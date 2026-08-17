@@ -29,7 +29,7 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_environment()
             self.assertTrue(settings.authenticates("a" * 32))
             self.assertFalse(settings.authenticates("b" * 32))
-            self.assertEqual(settings.codex_model, "gpt-5.4-mini")
+            self.assertEqual(settings.codex_model, "gpt-5.6-sol")
 
     def test_group_readable_or_short_capability_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
