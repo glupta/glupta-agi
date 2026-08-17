@@ -63,8 +63,8 @@ The Community profile is exactly one non-root app executor plus PostgreSQL.
 Only the intake port is published, on loopback. The secondary Codex home is a
 runtime mount, not a path embedded in the image or application.
 
-Create `inputs/` and `runtime/artifacts/`, then place private mode-`0600`
-values at `runtime/intake-token` and `runtime/postgres-password`. Point the
+Create `inputs/` and `runtime/`, then place private mode-`0600` values at
+`runtime/intake-token` and `runtime/postgres-password`. Point the
 deployment-only mount variable at the secondary subscription home and start
 the two-service profile:
 

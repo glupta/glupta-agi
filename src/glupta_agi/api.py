@@ -14,7 +14,7 @@ from .intake import IntakeError, load_request
 from .settings import Settings, SettingsError
 from .workflow import BriefGenerationError, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.2.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version="0.2.1", docs_url=None, redoc_url=None)
 
 
 @lru_cache(maxsize=1)
@@ -61,7 +61,6 @@ async def evidence_brief(
             input_root=settings.input_root,
             question=request.question,
             selected_paths=request.files,
-            write_artifacts=request.write_artifacts,
         )
     except IntakeError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
@@ -72,7 +71,6 @@ async def evidence_brief(
             evidence_brief_workflow,
             payload,
             workflow_id,
-            str(settings.artifact_root),
             str(settings.codex_home),
             settings.codex_model,
         )
@@ -81,7 +79,7 @@ async def evidence_brief(
     recorded_args = recorded.input["args"] if recorded is not None and recorded.input else ()
     if not recorded_args or not isinstance(recorded_args[0], dict):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "workflow input unavailable")
-    if recorded_args[0].get("request_digest") != canonical.request_digest:
+    if not canonical.matches_recorded_payload(recorded_args[0]):
         raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency-Key already binds other input")
 
     try:

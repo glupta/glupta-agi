@@ -10,7 +10,6 @@ class EvidenceBriefRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=32_768)
     files: list[str] = Field(min_length=1, max_length=20)
-    write_artifacts: bool = False
 
 
 class Citation(BaseModel):
