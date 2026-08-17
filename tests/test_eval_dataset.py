@@ -34,7 +34,7 @@ class EvalDatasetTests(unittest.TestCase):
                 self.assertLessEqual(len(case["files"]), 20)
                 self.assertLessEqual(
                     sum(len(content.encode("utf-8")) for content in case["files"].values()),
-                    10 * 1024 * 1024,
+                    256 * 1024,
                 )
                 for name, content in case["files"].items():
                     path = PurePosixPath(name)

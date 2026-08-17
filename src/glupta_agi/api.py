@@ -51,7 +51,7 @@ async def evidence_brief(
     request: EvidenceBriefRequest,
     authorization: str | None = Header(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_settings),  # noqa: B008 -- FastAPI dependency marker
 ) -> EvidenceBriefResponse:
     _bearer(authorization, settings)
     workflow_id = _workflow_id(idempotency_key)

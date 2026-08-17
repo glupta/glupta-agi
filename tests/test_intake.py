@@ -34,13 +34,9 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(one.sources[0].lines, ("alpha", "beta"))
 
     def test_changed_bytes_change_digest(self) -> None:
-        before = load_request(
-            input_root=self.root, question="q", selected_paths=["notes/facts.md"]
-        )
+        before = load_request(input_root=self.root, question="q", selected_paths=["notes/facts.md"])
         (self.root / "notes" / "facts.md").write_text("changed\n", encoding="utf-8")
-        after = load_request(
-            input_root=self.root, question="q", selected_paths=["notes/facts.md"]
-        )
+        after = load_request(input_root=self.root, question="q", selected_paths=["notes/facts.md"])
         self.assertNotEqual(before.request_digest, after.request_digest)
 
     def test_rejects_traversal_hidden_url_extension_duplicate_and_empty(self) -> None:
@@ -83,6 +79,6 @@ class IntakeTests(unittest.TestCase):
                 question="q",
                 selected_paths=[f"{index}.txt" for index in range(21)],
             )
-        (self.root / "large.txt").write_bytes(b"x" * (10 * 1024 * 1024 + 1))
+        (self.root / "large.txt").write_bytes(b"x" * (256 * 1024 + 1))
         with self.assertRaisesRegex(IntakeError, "byte limit"):
             load_request(input_root=self.root, question="q", selected_paths=["large.txt"])

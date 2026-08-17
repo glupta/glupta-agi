@@ -18,12 +18,13 @@ Current build state:
 - the only model route is local `qwen3.8:27b`;
 - later model upgrades require a new exact local-artifact amendment;
 - runtime bearer material is read from a mounted file and never persisted;
-- no deployment, activation, live messaging, external effect, or paid service
-  is authorized.
+- local Docker deployment is supported on loopback only;
+- no live messaging, external effect, or paid service is present.
 
-The reviewed Stage-0 design remains authoritative in Studio Hub. Its dependency
-capture/selection and seven-file Spec Kit promotion gates are independent of
-build admission; this repository does not bypass them.
+The Crawl acceptance boundary is this repository: one useful local evidence
+brief, durable workflow state, authenticated loopback intake, explicit local
+files, and no external effects. Later-stage architecture and release controls
+do not block this private MVP.
 
 ## Developer checks
 
@@ -34,5 +35,19 @@ selection:
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-The runtime environment and launch commands are added only after their exact
-dependency and activation receipts exist.
+## Local deployment
+
+The build may access official package and image registries. Application model
+and database routes are limited to PostgreSQL and the existing host Ollama
+endpoint; the API is published only on `127.0.0.1:8765`.
+
+Create `inputs/`, then place private mode-`0600` random values at
+`runtime/intake-token` and `runtime/postgres-password`. Start the service with:
+
+```sh
+docker compose up --build -d
+curl --fail http://127.0.0.1:8765/healthz
+```
+
+Submit only explicitly selected `.md` or `.txt` files from `inputs/`. The
+bearer capability is required for `/v1/evidence-brief` and is never committed.

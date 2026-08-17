@@ -6,12 +6,12 @@ import hashlib
 import json
 import os
 import stat
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
 
 MAX_FILES = 20
-MAX_TOTAL_BYTES = 10 * 1024 * 1024
+MAX_TOTAL_BYTES = 256 * 1024
 ALLOWED_SUFFIXES = {".md", ".txt"}
 
 
@@ -48,7 +48,11 @@ class CanonicalRequest:
 
 
 def _validate_relative_path(raw: str) -> tuple[str, ...]:
-    if not raw or "\\" in raw or any(ord(character) < 32 or ord(character) == 127 for character in raw):
+    if (
+        not raw
+        or "\\" in raw
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
         raise IntakeError("source path is invalid")
     if "://" in raw:
         raise IntakeError("URLs are not permitted")
@@ -139,7 +143,7 @@ def load_request(
             data = _read_regular_file(root_fd, parts)
             total += len(data)
             if total > MAX_TOTAL_BYTES:
-                raise IntakeError("selected sources exceed 10 MiB")
+                raise IntakeError("selected sources exceed 256 KiB")
             try:
                 content = data.decode("utf-8")
             except UnicodeDecodeError as exc:

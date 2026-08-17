@@ -10,7 +10,7 @@ from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.providers.ollama import OllamaProvider
 
 from .artifacts import persist_artifacts as persist_artifact_files
-from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, validate_citations
+from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
 from .contracts import EvidenceBrief
 
 
@@ -29,8 +29,7 @@ async def generate_brief(payload: dict[str, Any], base_url: str, model_name: str
     result = await _agent(base_url, model_name).run(
         build_user_prompt(str(payload["question"]), payload["sources"])
     )
-    brief = result.output
-    validate_citations(brief, payload["sources"])
+    brief = resolve_citations(result.output, payload["sources"])
     return brief.model_dump(mode="json")
 
 

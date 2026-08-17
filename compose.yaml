@@ -1,0 +1,70 @@
+name: glupta-crawl
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: glupta
+      POSTGRES_USER: glupta
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glupta -d glupta"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      - private
+
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GLUPTA_HOST: 0.0.0.0
+      GLUPTA_INPUT_ROOT: /inputs
+      GLUPTA_ARTIFACT_ROOT: /artifacts
+      GLUPTA_OLLAMA_URL: http://host.docker.internal:11434/v1
+      GLUPTA_INTAKE_TOKEN_FILE: /run/secrets/intake-token
+      GLUPTA_POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - intake-token
+      - postgres-password
+    volumes:
+      - ./inputs:/inputs:ro
+    tmpfs:
+      - /artifacts:uid=10001,gid=10001,mode=0700
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 127.0.0.1:8765:8080
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - private
+
+secrets:
+  intake-token:
+    file: ./runtime/intake-token
+  postgres-password:
+    file: ./runtime/postgres-password
+
+volumes:
+  postgres-data:
+
+networks:
+  private:
