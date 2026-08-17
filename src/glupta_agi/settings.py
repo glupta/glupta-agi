@@ -19,7 +19,7 @@ class Settings:
     artifact_root: Path
     token: str
     ollama_base_url: str
-    ollama_model: str = "qwen3.6:27b"
+    ollama_model: str = "qwen3.8:27b"
 
     @classmethod
     def from_environment(cls) -> "Settings":

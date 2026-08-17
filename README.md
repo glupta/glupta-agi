@@ -15,7 +15,8 @@ Current build state:
 - secure intake and request canonicalization are implemented;
 - DBOS owns durable execution and idempotency;
 - Pydantic AI owns the typed, single-pass Ollama route;
-- the only model route is local `qwen3.6:27b`;
+- the only model route is local `qwen3.8:27b`;
+- later model upgrades require a new exact local-artifact amendment;
 - runtime bearer material is read from a mounted file and never persisted;
 - no deployment, activation, live messaging, external effect, or paid service
   is authorized.
