@@ -101,3 +101,9 @@ The client accepts only the loopback Crawl endpoint, validates the private
 retry, and never prints the capability. Pass `--idempotency-key` to replay an
 exact prior request or `--token-file` when the private runtime directory is
 elsewhere.
+
+For replay-sensitive work, create a versioned input filename and leave its
+contents unchanged after submission. Record its SHA-256 and idempotency key;
+exact replay requires the same question and selected content, while changing a
+selected file under the same key is rejected. Mutable `current` aliases may
+continue to evolve, but do not select them when historical replay is required.
