@@ -11,14 +11,19 @@ from unittest.mock import Mock, patch
 
 from codex_cli_bin import bundled_codex_path
 from openai_codex import TransportClosedError
+from pydantic import TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
+from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai.usage import RequestUsage
 
+from glupta_agi.contracts import EvidenceBrief
 from glupta_agi.effects import AmbiguousEffectError, Effect
 from glupta_agi.workflow import (
     BriefGenerationError,
     _crawl_agent,
     _crawl_durability,
+    _crawl_model,
     _run_codex,
     crawl_observe_queue,
 )
@@ -57,31 +62,34 @@ def _transition(
 class FakeTurn:
     id = "turn-1"
 
-    def __init__(self, final_response: str) -> None:
+    def __init__(self, final_response: str, usage: object | None = None) -> None:
         self._final_response = final_response
+        self._usage = usage
 
     def run(self) -> SimpleNamespace:
         return SimpleNamespace(
             status=SimpleNamespace(value="completed"),
             final_response=self._final_response,
+            usage=self._usage,
         )
 
 
 class FakeThread:
     id = "thread-1"
 
-    def __init__(self, final_response: str) -> None:
+    def __init__(self, final_response: str, usage: object | None = None) -> None:
         self._final_response = final_response
+        self._usage = usage
         self.turn_kwargs: dict[str, object] = {}
 
     def turn(self, prompt: str, **kwargs: object) -> FakeTurn:
         self.turn_kwargs = {"prompt": prompt, **kwargs}
-        return FakeTurn(self._final_response)
+        return FakeTurn(self._final_response, self._usage)
 
 
 class FakeClient:
-    def __init__(self, final_response: str) -> None:
-        self.thread = FakeThread(final_response)
+    def __init__(self, final_response: str, usage: object | None = None) -> None:
+        self.thread = FakeThread(final_response, usage)
         self.start_kwargs: dict[str, object] = {}
         self.closed = False
 
@@ -112,7 +120,38 @@ class CodexBriefTests(unittest.TestCase):
         self.assertEqual(_crawl_durability._model_step_config, {"retries_allowed": False})
         self.assertFalse(_crawl_durability._register_legacy_workflows)
 
+    def test_native_model_response_retains_usage_through_pydantic_serialization(self) -> None:
+        packet = json.dumps(
+            {
+                "prompt": "question",
+                "sources": [],
+                "codex_home": self.codex_home,
+                "model_name": "gpt-5.6-sol",
+                "workflow_id": "workflow-1",
+                "request_digest": "digest-1",
+            }
+        )
+        brief = EvidenceBrief(answer="Grounded.", citations=[], uncertainties=[], next_decisions=[])
+        usage = RequestUsage(input_tokens=120, cache_read_tokens=20, output_tokens=30)
+        with patch("glupta_agi.workflow._run_codex", return_value=(brief, usage)):
+            response = _crawl_model(
+                [ModelRequest(parts=[UserPromptPart(content=packet)])],
+                Mock(),
+            )
+
+        adapter = TypeAdapter(ModelResponse)
+        restored = adapter.validate_json(adapter.dump_json(response))
+        self.assertEqual(restored.usage, usage)
+
     def test_runs_fenced_secondary_codex_without_tools_and_resolves_quote(self) -> None:
+        usage = SimpleNamespace(
+            last=SimpleNamespace(
+                input_tokens=120,
+                cached_input_tokens=20,
+                output_tokens=30,
+                reasoning_output_tokens=12,
+            )
+        )
         client = FakeClient(
             json.dumps(
                 {
@@ -128,13 +167,14 @@ class CodexBriefTests(unittest.TestCase):
                     "uncertainties": [],
                     "next_decisions": [],
                 }
-            )
+            ),
+            usage,
         )
         with (
             patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
             patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
         ):
-            result = _run_codex(
+            result, request_usage = _run_codex(
                 "question",
                 [{"path": "compose.txt", "content": "services:"}],
                 self.codex_home,
@@ -145,6 +185,11 @@ class CodexBriefTests(unittest.TestCase):
             )
 
         self.assertEqual(result.citations[0].quote, "services:")
+        self.assertEqual(request_usage.input_tokens, 120)
+        self.assertEqual(request_usage.cache_read_tokens, 20)
+        self.assertEqual(request_usage.output_tokens, 30)
+        self.assertEqual(request_usage.details, {"reasoning_output_tokens": 12})
+        self.assertIsNone(request_usage.cost)
         self.assertTrue(client.start_kwargs["ephemeral"])
         self.assertEqual(client.start_kwargs["model"], "gpt-5.6-sol")
         config = client.start_kwargs["config"]
@@ -273,7 +318,7 @@ class CodexBriefTests(unittest.TestCase):
         }
         factory = Mock()
         with patch("glupta_agi.workflow.reserve", return_value=_effect("reconciled", recorded)):
-            result = _run_codex(
+            result, request_usage = _run_codex(
                 "question",
                 [{"path": "compose.txt", "content": "services:"}],
                 self.codex_home,
@@ -284,6 +329,9 @@ class CodexBriefTests(unittest.TestCase):
             )
 
         self.assertEqual(result.answer, "Grounded answer.")
+        self.assertEqual(request_usage.details, {"sdk_usage_unavailable": 1})
+        self.assertTrue(request_usage.has_values())
+        self.assertIsNone(request_usage.cost)
         factory.assert_not_called()
         self.assertEqual(os.listdir(self.codex_home), [])
 

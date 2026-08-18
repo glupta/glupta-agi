@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from .contracts import EvidenceBriefRequest, EvidenceBriefResponse
 from .effects import AmbiguousEffectError
 from .intake import IntakeError, load_request
-from .settings import Settings, SettingsError, get_settings
+from .settings import Settings, get_settings
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
 app = FastAPI(title="glupta agi", version="0.2.9", docs_url=None, redoc_url=None)
@@ -83,11 +83,3 @@ async def evidence_brief(
     except BriefGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return EvidenceBriefResponse.model_validate(result)
-
-
-def load_app() -> FastAPI:
-    try:
-        get_settings()
-    except SettingsError:
-        raise
-    return app
