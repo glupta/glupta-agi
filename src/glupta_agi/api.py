@@ -14,7 +14,7 @@ from .intake import IntakeError, load_request
 from .settings import Settings, SettingsError
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.2.4", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version="0.2.5", docs_url=None, redoc_url=None)
 
 
 @lru_cache(maxsize=1)
