@@ -94,10 +94,8 @@ class OpenAIResponsesAdapter:
         remaining_seconds = (dispatch.wall_deadline - started).total_seconds()
         if remaining_seconds <= 0:
             raise AdapterError("model request exceeded the wall deadline")
-        client = None
-        cleanup_ambiguous = False
-        loop = asyncio.get_running_loop()
-        monotonic_deadline = loop.time() + remaining_seconds
+        client, cleanup_ambiguous, provider_rejected = None, False, False
+        monotonic_deadline = asyncio.get_running_loop().time() + remaining_seconds
         try:
             http_client = DefaultAsyncHttpxClient(trust_env=False, follow_redirects=False)
             client = self.client_factory(
@@ -109,9 +107,8 @@ class OpenAIResponsesAdapter:
                 headers = {"X-Client-Request-Id": client_request_id}
                 response = await client.responses.create(**request_body, extra_headers=headers)
                 completed = datetime.now(UTC)
-        except APIStatusError as exc:
-            del exc
-            raise ProviderRejectedError("OpenAI request was rejected") from None
+        except APIStatusError:
+            provider_rejected = True
         except Exception as exc:
             raise ProviderAmbiguousError("OpenAI request outcome is ambiguous") from exc
         finally:
@@ -123,6 +120,9 @@ class OpenAIResponsesAdapter:
                             await close()
                     except Exception:
                         cleanup_ambiguous = True
+        if provider_rejected:
+            error = ProviderAmbiguousError("OpenAI response cleanup is ambiguous") if cleanup_ambiguous else ProviderRejectedError("OpenAI request was rejected")  # noqa: E501
+            raise error from None
         status = str(getattr(response, "status", ""))
         request_id = str(getattr(response, "_request_id", "") or "")
         response_id = str(getattr(response, "id", "") or "")

@@ -133,8 +133,8 @@ def run_eval(dataset: Dataset[EvalInput, EvidenceBrief, EvalExpected]) -> Any:
     initialize(settings.dbos_system_database_url())
     profile, credential_file = settings.require_external_profile()
 
-    def generate(item: EvalInput) -> EvidenceBrief:
-        brief, _usage = _run_inference(
+    async def generate(item: EvalInput) -> EvidenceBrief:
+        result, _usage = await _run_inference(
             _CrawlModelPacket(
                 prompt=build_user_prompt(item.question, item.sources),
                 sources=item.sources,
@@ -151,7 +151,7 @@ def run_eval(dataset: Dataset[EvalInput, EvidenceBrief, EvalExpected]) -> Any:
                 ).hexdigest(),
             )
         )
-        return brief
+        return result.brief
 
     return dataset.evaluate_sync(
         generate,

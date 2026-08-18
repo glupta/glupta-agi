@@ -208,6 +208,37 @@ def test_authenticated_status_error_is_definitive_and_sanitized(status: int) -> 
     case.assertTrue(client.closed)
 
 
+def test_authenticated_status_error_with_expired_cleanup_is_ambiguous() -> None:
+    body = _body()
+    request = Request("POST", "https://api.openai.com/v1/responses")
+    response = Response(429, request=request, headers={"x-request-id": "req_rejected"})
+    error = APIStatusError("RAW_PROVIDER_BODY", response=response, body={"secret": "marker"})
+
+    class RejectingSlowCloseClient(FakeClient):
+        close_started = False
+        close_finished = False
+
+        async def close(self) -> None:
+            self.close_started = True
+            await asyncio.sleep(10)
+            self.close_finished = True
+
+    client = RejectingSlowCloseClient(error)
+    deadline = (datetime.now(UTC) + timedelta(milliseconds=20)).isoformat()
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, client_factory=lambda **_kwargs: client
+        )
+        with pytest.raises(ProviderAmbiguousError) as caught:
+            _generate(adapter, body, queue_deadline=deadline, wall_deadline=deadline)
+    case = TestCase()
+    case.assertIsNone(caught.value.audit)
+    case.assertNotIn("RAW_PROVIDER_BODY", "".join(traceback.format_exception(caught.value)))
+    case.assertTrue(client.close_started)
+    case.assertFalse(client.close_finished)
+
+
 def test_absolute_wall_deadline_cancels_transport_and_closes_client() -> None:
     body = _body()
 

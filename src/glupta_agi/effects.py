@@ -223,7 +223,7 @@ def transition(
                     hold_reason=COALESCE(:reason,hold_reason),updated_at=NOW()
                 WHERE workflow_id=:workflow_id AND (
                     state=:expected OR :recover AND state IN (
-                        'dispatching','returned','reconciled','unknown'
+                        'dispatching','returned','reconciled','failed','unknown'
                     )
                 ) RETURNING *
                 """

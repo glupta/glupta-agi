@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+from pydantic_ai.usage import RequestUsage
+from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import EvaluatorContext
 
-from evals.runner import EvalInput, GroundedBriefEvaluator, load_dataset
-from glupta_agi.contracts import Citation, EvidenceBrief
+from evals.runner import EvalInput, GroundedBriefEvaluator, load_dataset, run_eval
+from glupta_agi.contracts import Citation, EvidenceBrief, ProviderResult
+from tests.helpers import provider_audit, release_profile
 
 
 class CrawlEvalTests(unittest.TestCase):
@@ -49,6 +54,49 @@ class CrawlEvalTests(unittest.TestCase):
         path = Path(__file__).parents[1] / "evals" / "evidence_brief_v1.json"
         with self.assertRaisesRegex(ValueError, "unknown eval case"):
             load_dataset(path, case_names={"EV-999"})
+
+    def test_synthetic_runner_awaits_inference_through_pydantic_evals(self) -> None:
+        inputs = EvalInput(
+            question="What is the status?",
+            sources=[{"path": "status.md", "content": "Status: paused"}],
+        )
+        dataset = Dataset(name="synthetic", cases=[Case(name="synthetic", inputs=inputs)])
+        brief = EvidenceBrief(
+            answer="The status is paused.",
+            citations=[
+                Citation(path="status.md", line_start=1, line_end=1, quote="Status: paused")
+            ],
+            uncertainties=[],
+            next_decisions=[],
+        )
+        audit = provider_audit(
+            brief,
+            workflow_id="synthetic-workflow",
+            request_digest="a" * 64,
+        )
+        inference = AsyncMock(
+            return_value=(ProviderResult(brief=brief, audit=audit), RequestUsage())
+        )
+        settings = SimpleNamespace(
+            dbos_system_database_url=lambda: "postgresql://local/synthetic",
+            require_external_profile=lambda: (release_profile(), Path("/private/synthetic-key")),
+        )
+
+        with (
+            patch("evals.runner.Settings.from_environment", return_value=settings),
+            patch("evals.runner.initialize") as initialize,
+            patch("evals.runner._run_inference", inference),
+        ):
+            report = run_eval(dataset)
+
+        self.assertEqual(report.failures, [])
+        self.assertEqual(len(report.cases), 1)
+        self.assertEqual(report.cases[0].output, brief)
+        initialize.assert_called_once_with("postgresql://local/synthetic")
+        inference.assert_awaited_once()
+        packet = inference.await_args.args[0]
+        self.assertIn("What is the status?", packet.prompt)
+        self.assertEqual(packet.sources, inputs.sources)
 
     def test_forbidden_phrase_inside_negation_is_not_treated_as_asserted(self) -> None:
         output = EvidenceBrief(
