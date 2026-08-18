@@ -191,20 +191,23 @@ def test_official_sdk_wire_headers_are_bound_to_file_key_and_approved_project() 
     case.assertNotIn("openai-organization", headers)
 
 
-def test_hostile_openai_environment_is_rejected_before_credential_or_wire() -> None:
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        {"OPENAI_API_KEY": "ambient-credential", "OPENAI_PROJECT_ID": "proj_ambient"},
+        {"OPENAI_LOG": "debug"},
+        {"OPENAI_FUTURE_OVERRIDE": "future-sdk-setting"},
+    ],
+)
+def test_hostile_openai_environment_is_rejected_before_credential_or_wire(
+    hostile: dict[str, str],
+) -> None:
     body = _body()
-    hostile = {
-        "OPENAI_API_KEY": "ambient-credential",
-        "OPENAI_ADMIN_KEY": "ambient-admin",
-        "OPENAI_ORG_ID": "org_ambient",
-        "OPENAI_PROJECT_ID": "proj_ambient",
-        "OPENAI_BASE_URL": "https://example.invalid/v1",
-        "OPENAI_CUSTOM_HEADERS": "Authorization: Bearer ambient\nX-Marker: RAW_AMBIENT",
-    }
+    body["input"] = "RAW_SOURCE_BYTES"
     with (
         patch.dict(os.environ, hostile, clear=True),
         patch("glupta_agi.openai_adapter._read_api_key") as read_key,
-        pytest.raises(AdapterError, match="ambient"),
+        pytest.raises(AdapterError, match="ambient") as caught,
     ):
         _generate(
             OpenAIResponsesAdapter(
@@ -216,6 +219,7 @@ def test_hostile_openai_environment_is_rejected_before_credential_or_wire() -> N
             body,
         )
     read_key.assert_not_called()
+    _assert_sanitized(caught.value, "RAW_SOURCE_BYTES")
 
 
 @pytest.mark.parametrize(

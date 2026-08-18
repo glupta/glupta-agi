@@ -18,12 +18,6 @@ from .inference import FrozenDispatch, ReleaseProfile, usd_upper_bound
 
 _USAGE_FIELDS = set("input_tokens input_tokens_details output_tokens output_tokens_details total_tokens".split())  # noqa: E501
 _INPUT_DETAIL_FIELDS, _OUTPUT_DETAIL_FIELDS = set("cached_tokens cache_write_tokens".split()), {"reasoning_tokens"}  # noqa: E501
-_OPENAI_AMBIENT_OVERRIDES = frozenset({
-    "OPENAI_API_KEY", "OPENAI_ADMIN_KEY", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID",
-    "OPENAI_WEBHOOK_SECRET", "OPENAI_BASE_URL", "OPENAI_CUSTOM_HEADERS",
-})
-
-
 class AdapterError(RuntimeError):
     def __init__(self, message: str, audit: contracts.ProviderAudit | None = None) -> None:
         super().__init__(message)
@@ -94,7 +88,7 @@ class OpenAIResponsesAdapter:
         if (observed_identity != expected_identity
                 or self.credential_generation != self.profile.credential_generation):
             raise AdapterError("provider identity changed after effect reservation")
-        if _OPENAI_AMBIENT_OVERRIDES.intersection(os.environ):
+        if any(name.startswith("OPENAI_") for name in os.environ):
             raise AdapterError("unsupported ambient OpenAI configuration is present")
         key = _read_api_key(self.credential_file)
         client_request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, dispatch.digest()))
