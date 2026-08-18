@@ -464,3 +464,96 @@ class WorkflowTests(unittest.TestCase):
             _run(_packet(), adapter_factory=RejectingAdapter)
         self.assertEqual(transition.call_args.args[2], "failed")
         self.assertIsNotNone(transition.call_args.kwargs["audit"])
+
+    def test_terminal_failure_persistence_boundaries_never_redispatch(self) -> None:
+        def scenario(route: str, fault: str) -> None:
+            reason = "provider_rejected" if route == "rejection" else "invalid_citation"
+            store: dict[str, object] = {
+                "state": "reserved", "audit": None, "reason": None, "fault": fault,
+            }
+            hold_reasons: list[str] = []
+
+            class TerminalAdapter(FakeAdapter):
+                calls = 0
+
+                async def generate(
+                    self, dispatch: FrozenDispatch, body: dict[str, object]
+                ) -> ProviderResult:
+                    type(self).calls += 1
+                    if route == "rejection":
+                        raise ProviderRejectedError("RAW_PROVIDER", _audit())
+                    return await super().generate(dispatch, body)
+
+            def reserve_effect(dispatch: dict[str, object], digest: str) -> Effect:
+                if store.get("readback_fault") and TerminalAdapter.calls == 1:
+                    store["readback_fault"] = False
+                    raise RuntimeError("RAW_READBACK")
+                return Effect(
+                    workflow_id=str(dispatch["workflow_id"]),
+                    request_digest=str(dispatch["request_digest"]),
+                    dispatch_digest=digest,
+                    state=str(store["state"]),
+                    dispatch=dispatch,
+                    result=None,
+                    audit=store["audit"] if isinstance(store["audit"], dict) else None,
+                    hold_reason=str(store["reason"]) if store["reason"] else None,
+                )
+
+            def persist(
+                workflow_id: str, expected: str, state: str, **kwargs: object
+            ) -> Effect:
+                self.assertEqual(store["state"], expected)
+                if expected == "dispatching" and store["fault"]:
+                    if fault in {"after_commit", "tampered_commit"}:
+                        store.update(
+                            state=state, audit=kwargs["audit"], reason=kwargs["hold_reason"]
+                        )
+                        if fault == "tampered_commit":
+                            store["audit"] = {**store["audit"], "response_id": "tampered"}
+                    if fault == "readback_failure":
+                        store["readback_fault"] = True
+                    store["fault"] = None
+                    raise RuntimeError("RAW_TRANSITION")
+                store.update(
+                    state=state, audit=kwargs.get("audit"), reason=kwargs.get("hold_reason")
+                )
+                return reserve_effect(
+                    {"workflow_id": workflow_id, "request_digest": "a" * 64}, "e" * 64
+                )
+
+            def hold(_workflow_id: str, hold_reason: str, **_kwargs: object) -> None:
+                hold_reasons.append(hold_reason)
+                if fault != "hold_failure":
+                    store["state"] = "unknown"
+                raise AmbiguousEffectError("manual reconciliation required") from None
+
+            def exercise() -> None:
+                error = BriefGenerationError if fault == "after_commit" else AmbiguousEffectError
+                with self.assertRaises(error) as first:
+                    _run(_packet(), adapter_factory=TerminalAdapter)
+                with self.assertRaises(error):
+                    _run(_packet(), adapter_factory=TerminalAdapter)
+                self.assertNotIn("RAW_", "".join(traceback.format_exception(first.exception)))
+
+            with (
+                patch("glupta_agi.workflow.reserve", side_effect=reserve_effect),
+                patch("glupta_agi.workflow.transition", side_effect=persist),
+                patch("glupta_agi.workflow.hold_unknown", side_effect=hold),
+            ):
+                if route == "invalid_citation":
+                    with patch("glupta_agi.workflow.resolve_citations", side_effect=ValueError):
+                        exercise()
+                else:
+                    exercise()
+            self.assertEqual(TerminalAdapter.calls, 1)
+            if fault != "after_commit":
+                self.assertEqual(hold_reasons[0], f"{reason}_persistence_ambiguous")
+
+        faults = (
+            "before_commit", "after_commit", "tampered_commit",
+            "readback_failure", "hold_failure",
+        )
+        for route in ("rejection", "invalid_citation"):
+            for fault in faults:
+                with self.subTest(route=route, fault=fault):
+                    scenario(route, fault)

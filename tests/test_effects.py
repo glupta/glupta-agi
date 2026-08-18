@@ -66,13 +66,19 @@ def test_effect_row_rejects_call_or_budget_drift(overrides: dict[str, object]) -
 
 
 def test_effect_row_retains_frozen_dispatch_result_and_audit() -> None:
-    effect = _effect(_row(result_json={"answer": "grounded"}, audit_json={"total_tokens": 10}))
+    effect = _effect(
+        _row(
+            result_json={"answer": "grounded"}, audit_json={"total_tokens": 10},
+            hold_reason="provider_rejected",
+        )
+    )
     case = TestCase()
     case.assertEqual(effect.state, "reserved")
     case.assertEqual(effect.dispatch["max_usd_micros"], 1_850_000)
     case.assertEqual(effect.dispatch["queue_deadline"], "2099-01-01T00:00:00Z")
     case.assertEqual(effect.result, {"answer": "grounded"})
     case.assertEqual(effect.audit, {"total_tokens": 10})
+    case.assertEqual(effect.hold_reason, "provider_rejected")
 
 
 def _bound_result_and_audit() -> tuple[dict[str, object], dict[str, object]]:

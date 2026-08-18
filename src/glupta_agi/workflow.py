@@ -45,10 +45,8 @@ def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
         "instructions": SYSTEM_PROMPT,
         "input": prompt,
         "reasoning": {"effort": "medium"},
-        "text": {"format": {
-            "type": "json_schema", "name": "crawl_evidence_brief",
-            "schema": schema, "strict": True,
-        }},
+        "text": {"format": {"type": "json_schema", "name": "crawl_evidence_brief",
+                            "schema": schema, "strict": True}},
         "max_output_tokens": profile.max_output_tokens,
         "store": False,
         "background": False,
@@ -95,25 +93,28 @@ def _usage(audit: contracts.ProviderAudit) -> RequestUsage:
         input_tokens=audit.input_tokens, output_tokens=audit.output_tokens,
         cache_write_tokens=audit.cache_write_input_tokens,
         cache_read_tokens=audit.cached_input_tokens,
-        details={
-            "reasoning_output_tokens": audit.reasoning_tokens,
-            "cost_upper_bound_micros": audit.cost_upper_bound_micros,
-        },
+        details={"reasoning_output_tokens": audit.reasoning_tokens,
+                 "cost_upper_bound_micros": audit.cost_upper_bound_micros},
     )
 
 
-def _reconcile(
-    dispatch: FrozenDispatch, expected: str, result: dict[str, Any], audit: dict[str, Any]
+def _persist(
+    frozen: FrozenDispatch, state: str, audit: dict[str, Any] | None, *,
+    result: dict[str, Any] | None = None, reason: str | None = None,
 ) -> None:
     try:
-        transition(dispatch.workflow_id, expected, "reconciled", result=result, audit=audit)
+        transition(frozen.workflow_id, "dispatching", state, result=result, audit=audit,
+                   hold_reason=reason)
     except Exception:
+        ambiguity = f"{reason or 'result'}_persistence_ambiguous"
         try:
-            recorded = reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+            recorded = reserve(frozen.model_dump(mode="json"), frozen.digest())
         except Exception:
-            hold_unknown(dispatch.workflow_id, "result_persistence_ambiguous", audit=audit)
-        if recorded.state != "reconciled" or recorded.result != result or recorded.audit != audit:
-            hold_unknown(dispatch.workflow_id, "result_persistence_ambiguous", audit=audit)
+            hold_unknown(frozen.workflow_id, ambiguity, audit=audit)
+        target = (state, result, audit, reason)
+        observed = (recorded.state, recorded.result, recorded.audit, recorded.hold_reason)
+        if observed != target:
+            hold_unknown(frozen.workflow_id, ambiguity, audit=audit)
 
 
 async def _run_inference(
@@ -154,8 +155,7 @@ async def _run_inference(
         provider_result = await adapter.generate(dispatch, request_body)
     except openai_adapter.ProviderRejectedError as exc:
         rejected_audit = None if exc.audit is None else exc.audit.model_dump(mode="json")
-        transition(packet.workflow_id, "dispatching", "failed", audit=rejected_audit,
-                   hold_reason="provider_rejected")
+        _persist(dispatch, "failed", rejected_audit, reason="provider_rejected")
         raise BriefGenerationError("provider response was rejected") from None
     except openai_adapter.ProviderAmbiguousError as exc:
         audit = None if exc.audit is None else exc.audit.model_dump(mode="json")
@@ -166,15 +166,14 @@ async def _run_inference(
         brief = resolve_citations(provider_result.brief, packet.sources)
     except ValueError:
         rejected_audit = provider_result.audit.model_dump(mode="json")
-        transition(packet.workflow_id, "dispatching", "failed", audit=rejected_audit,
-                   hold_reason="invalid_citation")
+        _persist(dispatch, "failed", rejected_audit, reason="invalid_citation")
         raise BriefGenerationError("provider output failed citation validation") from None
     result = brief.model_dump(mode="json")
     digest = contracts.canonical_digest(result)
     audit = provider_result.audit.model_copy(update={"validated_result_digest": digest})
     audit = audit.model_copy(update={"record_digest": contracts.provider_record_digest(brief, audit)})  # noqa: E501
     audit_json = audit.model_dump(mode="json")
-    _reconcile(dispatch, "dispatching", result, audit_json)
+    _persist(dispatch, "reconciled", audit_json, result=result)
     return contracts.ProviderResult(brief=brief, audit=audit), _usage(audit)
 
 

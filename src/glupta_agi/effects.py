@@ -26,6 +26,7 @@ class Effect:
     dispatch: dict[str, Any]
     result: dict[str, Any] | None
     audit: dict[str, Any] | None
+    hold_reason: str | None = None
 
 
 _datasource: SQLAlchemyDatasource | None = None
@@ -156,6 +157,7 @@ def _effect(row: dict[str, Any]) -> Effect:
         workflow_id=str(row["workflow_id"]), request_digest=str(row["request_digest"]),
         dispatch_digest=str(row["dispatch_digest"]), state=str(row["state"]),
         dispatch=frozen.model_dump(mode="json"), result=result, audit=audit,
+        hold_reason=None if row.get("hold_reason") is None else str(row["hold_reason"]),
     )
 
 
