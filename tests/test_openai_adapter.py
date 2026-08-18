@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
@@ -66,6 +67,10 @@ def _dispatch(body: dict[str, object], **overrides: object) -> FrozenDispatch:
     return FrozenDispatch.model_validate(values)
 
 
+def _profile_for_key(key: str):
+    return release_profile(credential_sha256=hashlib.sha256(key.encode("utf-8")).hexdigest())
+
+
 def _response(**overrides: object) -> SimpleNamespace:
     brief = {
         "answer": "Grounded.",
@@ -109,6 +114,7 @@ class FakeClient:
 
 
 def _generate(adapter: OpenAIResponsesAdapter, body: dict[str, object], **overrides: object):
+    overrides.setdefault("release_profile_digest", adapter.profile.digest())
     return asyncio.run(adapter.generate(_dispatch(body, **overrides), body))
 
 
@@ -169,7 +175,8 @@ def test_official_sdk_wire_headers_are_bound_to_file_key_and_approved_project() 
         )
 
     with tempfile.TemporaryDirectory() as temporary:
-        key = private_file(Path(temporary), "api-key", "file-api-key-" + "x" * 32)
+        key_value = "file-api-key-" + "x" * 32
+        key = private_file(Path(temporary), "api-key", key_value)
         http_client = AsyncClient(transport=MockTransport(reject))
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -180,7 +187,7 @@ def test_official_sdk_wire_headers_are_bound_to_file_key_and_approved_project() 
             pytest.raises(ProviderRejectedError),
         ):
             _generate(
-                OpenAIResponsesAdapter(release_profile(), key, credential_generation=1),
+                OpenAIResponsesAdapter(_profile_for_key(key_value), key, credential_generation=1),
                 body,
             )
     headers = captured["headers"]
@@ -321,9 +328,10 @@ def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensiti
     )
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        key = private_file(root, "api-key", "file-api-key-" + "x" * 32)
+        key_value = "file-api-key-" + "x" * 32
+        key = private_file(root, "api-key", key_value)
         adapter = OpenAIResponsesAdapter(
-            release_profile(),
+            _profile_for_key(key_value),
             key,
             credential_generation=1,
             client_factory=lambda **_kwargs: FakeClient(provider_error),
@@ -336,7 +344,7 @@ def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensiti
         invalid_key.write_bytes(b"\xffRAW_CREDENTIAL_BYTES" + b"x" * 32)
         invalid_key.chmod(0o600)
         invalid_adapter = OpenAIResponsesAdapter(
-            release_profile(),
+            _profile_for_key(key_value),
             invalid_key,
             credential_generation=1,
             client_factory=lambda **_kwargs: pytest.fail("transport constructed"),
@@ -514,7 +522,6 @@ def test_profile_request_and_credential_drift_reject_without_transport() -> None
         key.chmod(0o640)
         with pytest.raises(AdapterError):
             _generate(adapter, body)
-
         expired = release_profile(
             credential_expires_at="2020-01-01T00:00:00Z",
             evidence_expires_at="2020-01-01T00:00:00Z",
@@ -525,3 +532,20 @@ def test_profile_request_and_credential_drift_reject_without_transport() -> None
                     expired, key, credential_generation=1, client_factory=factory
                 ).generate(_dispatch(body, release_profile_digest=expired.digest()), body)
             )
+
+
+def test_wrong_private_key_bytes_reject_before_client_with_sanitized_error() -> None:
+    body = _body()
+    with tempfile.TemporaryDirectory() as temporary:
+        wrong_key = private_file(
+            Path(temporary), "api-key", "RAW_WRONG_CREDENTIAL_BYTES-" + "x" * 32
+        )
+        adapter = OpenAIResponsesAdapter(
+            release_profile(),
+            wrong_key,
+            credential_generation=1,
+            client_factory=lambda **_kwargs: pytest.fail("wire transport constructed"),
+        )
+        with pytest.raises(AdapterError, match="approved identity") as caught:
+            _generate(adapter, body)
+    _assert_sanitized(caught.value, "RAW_WRONG_CREDENTIAL_BYTES")

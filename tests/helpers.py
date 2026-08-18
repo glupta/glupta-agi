@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,9 @@ def release_profile(**overrides: object) -> ReleaseProfile:
         "service_account_id": "svc_crawl",
         "api_key_id": "key_crawl",
         "credential_generation": 1,
+        "credential_sha256": hashlib.sha256(
+            ("secret-api-key-" + "x" * 32).encode("utf-8")
+        ).hexdigest(),
         "credential_expires_at": "2099-01-01T00:00:00Z",
         "evidence_expires_at": "2099-01-01T00:00:00Z",
         "data_terms_digest": digest,

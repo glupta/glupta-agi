@@ -554,7 +554,7 @@ class WorkflowTests(unittest.TestCase):
             raise AmbiguousEffectError("manual reconciliation required") from None
 
         with tempfile.TemporaryDirectory() as temporary:
-            key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
+            key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
 
             def factory(
                 profile: object, credential_file: Path, *, credential_generation: int

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import stat
 import uuid
@@ -36,7 +38,7 @@ def _field_names(value: Any) -> set[str]:
     return set(value.model_dump(exclude_none=False) if hasattr(value, "model_dump") else vars(value))  # noqa: E501
 
 
-def _read_api_key(path: Path) -> str:
+def _read_api_key(path: Path, expected_sha256: str) -> str:
     file_fd, unavailable = -1, False
     try:
         file_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -58,6 +60,9 @@ def _read_api_key(path: Path) -> str:
         raise AdapterError("OpenAI credential is unavailable") from None
     if not 20 <= len(key.encode()) <= 512:
         raise AdapterError("OpenAI credential length is invalid")
+    observed_sha256 = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(observed_sha256, expected_sha256):
+        raise AdapterError("OpenAI credential does not match the approved identity and generation")
     return key
 
 
@@ -90,7 +95,7 @@ class OpenAIResponsesAdapter:
             raise AdapterError("provider identity changed after effect reservation")
         if any(name.startswith("OPENAI_") for name in os.environ):
             raise AdapterError("unsupported ambient OpenAI configuration is present")
-        key = _read_api_key(self.credential_file)
+        key = _read_api_key(self.credential_file, self.profile.credential_sha256)
         client_request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, dispatch.digest()))
         started = datetime.now(UTC)
         remaining_seconds = (dispatch.wall_deadline - started).total_seconds()

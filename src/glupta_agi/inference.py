@@ -34,6 +34,7 @@ class ReleaseProfile(BaseModel):
     service_account_id: str = Field(min_length=3, max_length=256)
     api_key_id: str = Field(min_length=3, max_length=256)
     credential_generation: StrictInt = Field(ge=1)
+    credential_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     credential_expires_at: datetime
     evidence_expires_at: datetime
     data_terms_digest: str = Field(pattern=r"^[0-9a-f]{64}$")

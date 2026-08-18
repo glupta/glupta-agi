@@ -139,7 +139,7 @@ def test_lost_failed_ack_without_exact_readback_becomes_sticky_unknown(readback:
 @pytest.mark.parametrize("status", [408, 409, 429, 500, 503])
 def test_retryable_status_is_sticky_unknown_and_replay_never_redispatches(status: int) -> None:
     with tempfile.TemporaryDirectory() as temporary:
-        key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         packet = _packet(credential_file=str(key))
         request = Request("POST", "https://api.openai.com/v1/responses")
         response = Response(status, request=request, headers={"x-request-id": "req_unknown"})
@@ -192,7 +192,7 @@ def test_retryable_status_is_sticky_unknown_and_replay_never_redispatches(status
 
 def test_terminal_rejection_with_cleanup_expiry_is_sticky_unknown() -> None:
     with tempfile.TemporaryDirectory() as temporary:
-        key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         packet = _packet(credential_file=str(key), near_deadline=True)
         request = Request("POST", "https://api.openai.com/v1/responses")
         response = Response(400, request=request, headers={"x-request-id": "req_rejected"})
