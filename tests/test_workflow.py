@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import traceback
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from codex_cli_bin import bundled_codex_path
+from openai_codex import TransportClosedError
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 
@@ -204,6 +206,16 @@ class CodexBriefTests(unittest.TestCase):
                 "TMPDIR",
             },
         )
+        self.assertEqual(
+            launch_args[codex_index + 1 :],
+            (
+                "-c",
+                'cli_auth_credentials_store="file"',
+                "app-server",
+                "--listen",
+                "stdio://",
+            ),
+        )
         probe = subprocess.run(  # noqa: S603 -- launcher is resolved from os.defpath
             [*launch_args[:codex_index], launch_args[0]],
             check=True,
@@ -261,12 +273,13 @@ class CodexBriefTests(unittest.TestCase):
         factory.assert_not_called()
 
     def test_invalid_typed_output_is_terminal_not_retried(self) -> None:
-        client = FakeClient("{}")
+        sentinel = "CRAWL_INVALID_OUTPUT_SENTINEL"
+        client = FakeClient(json.dumps({"answer": sentinel}))
         with (
             patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
             patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
         ):
-            with self.assertRaises(BriefGenerationError):
+            with self.assertRaises(BriefGenerationError) as caught:
                 _run_codex(
                     "question",
                     [{"path": "compose.txt", "content": "services:"}],
@@ -278,3 +291,85 @@ class CodexBriefTests(unittest.TestCase):
                 )
 
         self.assertEqual(transition.call_args_list[-1].args[2], "failed")
+        self.assertIsNone(caught.exception.__context__)
+        rendered = "".join(traceback.format_exception(caught.exception))
+        self.assertNotIn(sentinel, rendered)
+
+    def test_provider_error_is_held_with_sanitized_token_and_no_raw_context(self) -> None:
+        sentinel = "CRAWL_PROVIDER_ERROR_SENTINEL"
+
+        class FailingClient(FakeClient):
+            def thread_start(self, **kwargs: object) -> FakeThread:
+                del kwargs
+                raise TransportClosedError(sentinel)
+
+        client = FailingClient("")
+        factory = Mock(return_value=client)
+        held: list[tuple[Effect, str]] = []
+
+        def sanitized_hold(effect: Effect, reason: str) -> None:
+            held.append((effect, reason))
+            raise AmbiguousEffectError("model effect requires reconciliation")
+
+        with (
+            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
+            patch("glupta_agi.workflow.transition", side_effect=_transition),
+            patch("glupta_agi.workflow.hold_unknown", side_effect=sanitized_hold),
+        ):
+            with self.assertRaises(AmbiguousEffectError) as caught:
+                _run_codex(
+                    "question",
+                    [{"path": "compose.txt", "content": "services:"}],
+                    "/run/codex",
+                    "gpt-5.6-sol",
+                    "workflow-1",
+                    "digest-1",
+                    codex_factory=factory,
+                )
+
+        factory.assert_called_once()
+        self.assertTrue(client.closed)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0][1], "provider_transport_closed_after_dispatching")
+        self.assertIsNone(caught.exception.__context__)
+        rendered = "".join(traceback.format_exception(caught.exception))
+        self.assertNotIn(sentinel, str(caught.exception))
+        self.assertNotIn(sentinel, repr(caught.exception))
+        self.assertNotIn(sentinel, rendered)
+
+    def test_pre_turn_value_error_is_provider_failure_not_invalid_output(self) -> None:
+        sentinel = "CRAWL_PROVIDER_VALUE_ERROR_SENTINEL"
+
+        class FailingClient(FakeClient):
+            def thread_start(self, **kwargs: object) -> FakeThread:
+                del kwargs
+                raise ValueError(sentinel)
+
+        client = FailingClient("")
+        held: list[str] = []
+
+        def sanitized_hold(effect: Effect, reason: str) -> None:
+            del effect
+            held.append(reason)
+            raise AmbiguousEffectError("model effect requires reconciliation")
+
+        with (
+            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
+            patch("glupta_agi.workflow.transition", side_effect=_transition),
+            patch("glupta_agi.workflow.hold_unknown", side_effect=sanitized_hold),
+        ):
+            with self.assertRaises(AmbiguousEffectError) as caught:
+                _run_codex(
+                    "question",
+                    [{"path": "compose.txt", "content": "services:"}],
+                    "/run/codex",
+                    "gpt-5.6-sol",
+                    "workflow-1",
+                    "digest-1",
+                    codex_factory=lambda config: client,
+                )
+
+        self.assertTrue(client.closed)
+        self.assertEqual(held, ["provider_error_after_dispatching"])
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn(sentinel, "".join(traceback.format_exception(caught.exception)))

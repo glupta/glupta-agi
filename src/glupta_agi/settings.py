@@ -5,7 +5,9 @@ from __future__ import annotations
 import hmac
 import os
 import stat
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -39,8 +41,23 @@ def _read_private_file(path: Path, *, label: str, maximum_bytes: int) -> str:
 
 
 def _validate_codex_runtime(home: Path) -> None:
-    if not home.is_absolute() or not (home / "auth.json").is_file():
+    if not home.is_absolute():
         raise SettingsError("Crawl must use the configured secondary Codex subscription")
+    for attempt in range(2):
+        try:
+            metadata = (home / "auth.json").lstat()
+        except OSError:
+            metadata = None
+        if metadata is not None and (
+            stat.S_ISREG(metadata.st_mode)
+            and not stat.S_ISLNK(metadata.st_mode)
+            and stat.S_IMODE(metadata.st_mode) == 0o600
+            and metadata.st_uid == os.geteuid()
+        ):
+            return
+        if attempt == 0:
+            time.sleep(0.5)
+    raise SettingsError("Crawl must use the configured secondary Codex subscription")
 
 
 @dataclass(frozen=True)
@@ -92,3 +109,9 @@ class Settings:
 
     def authenticates(self, candidate: str) -> bool:
         return hmac.compare_digest(self.token.encode(), candidate.encode())
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Load and validate the immutable process settings exactly once."""
+    return Settings.from_environment()

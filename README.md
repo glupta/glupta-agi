@@ -61,16 +61,22 @@ uv lock --check
 ## Local deployment
 
 The Community profile is exactly one non-root app executor plus PostgreSQL.
-Only the intake port is published, on loopback. The secondary Codex home is a
-runtime mount, not a path embedded in the image or application.
+Only the intake port is published, on loopback. Codex mutable state is confined
+to a bounded, hardened container tmpfs. Only the dedicated secondary
+subscription's `auth.json` is mounted from the host; the rest of that Codex home
+is never exposed to the app.
 
 Create `inputs/` and `runtime/`, then place private mode-`0600` values at
-`runtime/intake-token` and `runtime/postgres-password`. Point the
-deployment-only mount variable at the secondary subscription home and start
-the two-service profile:
+`runtime/intake-token` and `runtime/postgres-password`. The secondary credential
+must be dedicated to Crawl for the deployment lifetime; do not run another
+Codex process or machine from the same credential family concurrently. Verify
+only its metadata, then point the deployment-only mount variable at the exact
+regular, non-symlink mode-`0600` file and start the two-service profile:
 
 ```sh
-export GLUPTA_SECONDARY_CODEX_HOME=/absolute/path/to/secondary/codex-home
+GLUPTA_CODEX_AUTH_FILE=/absolute/path/to/secondary/codex-home/auth.json
+uv run python -c 'import os,stat,sys; s=os.lstat(sys.argv[1]); assert stat.S_ISREG(s.st_mode) and not stat.S_ISLNK(s.st_mode) and s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == 0o600' "$GLUPTA_CODEX_AUTH_FILE"
+export GLUPTA_SECONDARY_CODEX_AUTH_FILE="$GLUPTA_CODEX_AUTH_FILE"
 export GLUPTA_UID=$(id -u) GLUPTA_GID=$(id -g)
 docker compose up -d --build --remove-orphans
 curl --fail http://127.0.0.1:8765/healthz
