@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
+
+from glupta_agi import __version__
+from glupta_agi.__main__ import main
+from glupta_agi.api import app
 
 ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "src" / "glupta_agi"
 
 
 class ReleaseBoundaryTests(TestCase):
+    def test_package_runtime_api_and_dbos_share_one_version_identity(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(project["project"]["version"], __version__)
+        self.assertEqual(app.version, __version__)
+        settings = SimpleNamespace(dbos_system_database_url=lambda: "postgresql://local/runtime")
+        with (
+            patch("glupta_agi.__main__.get_settings", return_value=settings),
+            patch("glupta_agi.__main__.DBOS") as dbos,
+            patch("glupta_agi.effects.initialize"),
+            patch("glupta_agi.__main__.uvicorn.run"),
+        ):
+            main()
+        self.assertEqual(dbos.call_args.kwargs["config"]["application_version"], __version__)
+
     def test_production_boundary_excludes_consumer_codex_and_eval_harness(self) -> None:
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         sources = {
