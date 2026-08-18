@@ -17,6 +17,7 @@ from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from glupta_agi.contracts import (
+    DISCLOSURE_NOTICE_DIGEST,
     Citation,
     EvidenceBrief,
     ProviderAudit,
@@ -28,6 +29,7 @@ from glupta_agi.effects import AmbiguousEffectError, Effect
 from glupta_agi.inference import (
     FrozenDispatch,
 )
+from glupta_agi.intake import admit_inline_request
 from glupta_agi.openai_adapter import (
     OpenAIResponsesAdapter,
     ProviderAmbiguousError,
@@ -48,28 +50,43 @@ from tests.helpers import private_file, release_profile
 _WORKFLOW_ID = "0198be50-0000-7000-8000-000000000000"
 
 
+def _admitted(
+    question: str = "question", source_content: str = "grounded fact"
+) -> dict[str, object]:
+    return admit_inline_request(
+        question=question,
+        sources=[{"path": "source.md", "content": source_content}],
+        disclosure_profile="external_disclosed_v1",
+        disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+        external_disclosure_ack=True,
+    ).workflow_payload()
+
+
+_REQUEST_DIGEST = str(_admitted()["request_digest"])
+
+
 def _packet(
     *,
     prompt: str = "question",
     workflow_id: str | None = None,
     admitted_at: datetime | None = None,
     credential_file: str = "/private/api-key",
+    source_content: str = "grounded fact",
 ) -> _CrawlModelPacket:
     return _CrawlModelPacket(
-        prompt=prompt,
-        sources=[{"path": "source.md", "content": "grounded fact"}],
+        admitted_request=_admitted(prompt, source_content),
         release_profile=release_profile(),
         credential_file=credential_file,
+        credential_generation=1,
         admitted_at=admitted_at or datetime.now(UTC),
         workflow_id=workflow_id or _WORKFLOW_ID,
-        request_digest="a" * 64,
     )
 
 
 def _audit(**overrides: object) -> ProviderAudit:
     values: dict[str, object] = {
         "workflow_id": _WORKFLOW_ID,
-        "request_digest": "a" * 64,
+        "request_digest": _REQUEST_DIGEST,
         "release_profile_digest": release_profile().digest(),
         "client_request_id": "0198be50-0000-7000-8000-000000000000",
         "provider_request_id": "req_1",
@@ -83,7 +100,7 @@ def _audit(**overrides: object) -> ProviderAudit:
         "output_tokens": 20,
         "reasoning_tokens": 5,
         "total_tokens": 120,
-        "cost_upper_bound_micros": 1_100,
+        "cost_upper_bound_micros": 1_225,
         "request_body_digest": "b" * 64,
         "output_digest": "c" * 64,
         "validated_result_digest": "d" * 64,
@@ -142,7 +159,9 @@ class FakeAdapter:
     request_body: dict[str, object] | None = None
     dispatch: object = None
 
-    def __init__(self, _profile: object, _credential: Path) -> None:
+    def __init__(self, _profile: object, _credential: Path, *, credential_generation: int) -> None:
+        if credential_generation != 1:
+            raise ValueError
         pass
 
     async def generate(
@@ -197,7 +216,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(body["store"])
         self.assertFalse(body["stream"])
         self.assertEqual(
-            [call.args[2] for call in transition.call_args_list], ["dispatching", "reconciled"],
+            [call.args[2] for call in transition.call_args_list],
+            ["dispatching", "reconciled"],
         )
         returned = transition.call_args_list[1]
         self.assertEqual(
@@ -225,7 +245,7 @@ class WorkflowTests(unittest.TestCase):
             result, usage = _run(_packet(), adapter_factory=factory)
         self.assertEqual(result.brief.answer, "Grounded.")
         self.assertEqual(usage.output_tokens, 20)
-        self.assertEqual(usage.details["cost_upper_bound_micros"], 1_100)
+        self.assertEqual(usage.details["cost_upper_bound_micros"], 1_225)
         factory.assert_not_called()
 
     def test_initial_and_replay_public_results_return_identical_bound_audit(self) -> None:
@@ -238,11 +258,7 @@ class WorkflowTests(unittest.TestCase):
         provider_result = ProviderResult(
             brief=brief, audit=_recorded_audit(brief.model_dump(mode="json"))
         )
-        payload = {
-            "question": "question",
-            "sources": [{"path": "source.md", "content": "grounded fact"}],
-            "request_digest": "a" * 64,
-        }
+        payload = _admitted()
         with patch.object(
             _crawl_agent, "run", new=AsyncMock(return_value=SimpleNamespace(output=provider_result))
         ):
@@ -253,6 +269,7 @@ class WorkflowTests(unittest.TestCase):
                         _WORKFLOW_ID,
                         release_profile().model_dump(mode="json"),
                         "/private/key",
+                        1,
                         datetime.now(UTC).isoformat(),
                     )
                 )
@@ -260,7 +277,7 @@ class WorkflowTests(unittest.TestCase):
             ]
         self.assertEqual(responses[0], responses[1])
         self.assertEqual(responses[0]["provider_audit"]["provider_request_id"], "req_1")
-        self.assertEqual(responses[0]["provider_audit"]["cost_upper_bound_micros"], 1_100)
+        self.assertEqual(responses[0]["provider_audit"]["cost_upper_bound_micros"], 1_225)
 
     def test_replay_rejects_result_or_audit_digest_tampering_without_adapter(self) -> None:
         recorded = EvidenceBrief(
@@ -281,14 +298,77 @@ class WorkflowTests(unittest.TestCase):
                     side_effect=_reserve(
                         "reconciled",
                         result=result,
-                        audit=_recorded_audit(recorded).model_copy(
-                            update={"validated_result_digest": digest}
-                        ).model_dump(mode="json"),
+                        audit=_recorded_audit(recorded)
+                        .model_copy(update={"validated_result_digest": digest})
+                        .model_dump(mode="json"),
                     ),
                 ),
                 self.assertRaisesRegex(BriefGenerationError, "failed validation"),
             ):
                 _run(_packet(), adapter_factory=factory)
+        factory.assert_not_called()
+
+    def test_replay_rejects_non_integer_subset_and_cost_inconsistency_without_adapter(self) -> None:
+        recorded = EvidenceBrief(
+            answer="Grounded.",
+            citations=[Citation(path="source.md", line_start=1, line_end=1, quote="grounded fact")],
+            uncertainties=[],
+            next_decisions=[],
+        ).model_dump(mode="json")
+        brief = EvidenceBrief.model_validate(recorded)
+        factory = Mock()
+        for mutation in (
+            {"input_tokens": True, "total_tokens": 21},
+            {"reasoning_tokens": 21},
+            {"cached_input_tokens": 60, "cache_write_input_tokens": 60},
+            {"cost_upper_bound_micros": 1},
+        ):
+            audit = _recorded_audit(recorded).model_copy(update=mutation)
+            audit = audit.model_copy(update={"record_digest": provider_record_digest(brief, audit)})
+            with (
+                self.subTest(mutation=mutation),
+                patch(
+                    "glupta_agi.workflow.reserve",
+                    side_effect=_reserve(
+                        "reconciled", result=recorded, audit=audit.model_dump(mode="json")
+                    ),
+                ),
+                self.assertRaisesRegex(BriefGenerationError, "failed validation"),
+            ):
+                _run(_packet(), adapter_factory=factory)
+        factory.assert_not_called()
+
+    def test_disclosure_digest_and_credential_generation_are_reverified_before_effect(self) -> None:
+        packet = _packet()
+        admitted = packet.admitted_request
+        mutations = (
+            {**admitted, "disclosure_profile": "local_only"},
+            {**admitted, "disclosure_notice_digest": "0" * 64},
+            {**admitted, "external_disclosure_ack": False},
+            {**admitted, "request_digest": "f" * 64},
+            {
+                **admitted,
+                "sources": [{**admitted["sources"][0], "content": "changed"}],
+            },
+        )
+        factory = Mock()
+        for mutation in mutations:
+            with (
+                self.subTest(mutation=mutation),
+                patch("glupta_agi.workflow.reserve") as reserve,
+                self.assertRaisesRegex(BriefGenerationError, "admitted request"),
+            ):
+                _run(
+                    packet.model_copy(update={"admitted_request": mutation}),
+                    adapter_factory=factory,
+                )
+            reserve.assert_not_called()
+        with (
+            patch("glupta_agi.workflow.reserve") as reserve,
+            self.assertRaisesRegex(BriefGenerationError, "credential generation"),
+        ):
+            _run(packet.model_copy(update={"credential_generation": 2}), adapter_factory=factory)
+        reserve.assert_not_called()
         factory.assert_not_called()
 
     def test_queue_deadline_uses_server_admission_not_caller_uuid_time(self) -> None:
@@ -346,22 +426,16 @@ class WorkflowTests(unittest.TestCase):
                     audit=audit if isinstance(audit, dict) else None,
                 )
 
-            def persist(
-                workflow_id: str, expected: str, state: str, **kwargs: object
-            ) -> Effect:
+            def persist(workflow_id: str, expected: str, state: str, **kwargs: object) -> Effect:
                 self.assertEqual(store["state"], expected)
                 if expected == "dispatching" and store["fault"]:
                     if str(store["fault"]).startswith("after_"):
-                        store.update(
-                            state=state, result=kwargs["result"], audit=kwargs["audit"]
-                        )
+                        store.update(state=state, result=kwargs["result"], audit=kwargs["audit"])
                         if store["fault"] == "after_tampered_commit":
                             store["audit"] = {**store["audit"], "response_id": "tampered"}
                     store["fault"] = None
                     raise RuntimeError("ambiguous commit acknowledgement")
-                store.update(
-                    state=state, result=kwargs.get("result"), audit=kwargs.get("audit")
-                )
+                store.update(state=state, result=kwargs.get("result"), audit=kwargs.get("audit"))
                 return reserve_effect(
                     {"workflow_id": workflow_id, "request_digest": "a" * 64}, "e" * 64
                 )
@@ -432,16 +506,17 @@ class WorkflowTests(unittest.TestCase):
             patch("glupta_agi.workflow.reserve") as reserve,
             self.assertRaisesRegex(BriefGenerationError, "input-token"),
         ):
-            _run(_packet(prompt="x" * 280_000), adapter_factory=factory)
+            _run(
+                _packet(prompt="x" * 32_000, source_content="y" * (256 * 1024)),
+                adapter_factory=factory,
+            )
         reserve.assert_not_called()
 
     def test_ambiguous_provider_failure_is_redacted_and_sticky(self) -> None:
         sentinel = "RAW_PROVIDER_MARKER"
 
         class FailingAdapter(FakeAdapter):
-            async def generate(
-                self, _dispatch: object, _body: dict[str, object]
-            ) -> ProviderResult:
+            async def generate(self, _dispatch: object, _body: dict[str, object]) -> ProviderResult:
                 raise ProviderAmbiguousError(sentinel)
 
         def hold(_workflow_id: str, reason: str, **_kwargs: object) -> None:
@@ -481,9 +556,14 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
 
-            def factory(profile: object, credential_file: Path) -> OpenAIResponsesAdapter:
+            def factory(
+                profile: object, credential_file: Path, *, credential_generation: int
+            ) -> OpenAIResponsesAdapter:
                 return OpenAIResponsesAdapter(
-                    profile, credential_file, client_factory=lambda **_kwargs: RejectingClient()
+                    profile,
+                    credential_file,
+                    credential_generation=credential_generation,
+                    client_factory=lambda **_kwargs: RejectingClient(),
                 )
 
             with (
@@ -500,9 +580,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_definitive_rejection_is_failed_without_retry(self) -> None:
         class RejectingAdapter(FakeAdapter):
-            async def generate(
-                self, _dispatch: object, _body: dict[str, object]
-            ) -> ProviderResult:
+            async def generate(self, _dispatch: object, _body: dict[str, object]) -> ProviderResult:
                 raise ProviderRejectedError("invalid output", _audit())
 
         with (
@@ -518,7 +596,10 @@ class WorkflowTests(unittest.TestCase):
         def scenario(route: str, fault: str) -> None:
             reason = "provider_rejected" if route == "rejection" else "invalid_citation"
             store: dict[str, object] = {
-                "state": "reserved", "audit": None, "reason": None, "fault": fault,
+                "state": "reserved",
+                "audit": None,
+                "reason": None,
+                "fault": fault,
             }
             hold_reasons: list[str] = []
 
@@ -548,9 +629,7 @@ class WorkflowTests(unittest.TestCase):
                     hold_reason=str(store["reason"]) if store["reason"] else None,
                 )
 
-            def persist(
-                workflow_id: str, expected: str, state: str, **kwargs: object
-            ) -> Effect:
+            def persist(workflow_id: str, expected: str, state: str, **kwargs: object) -> Effect:
                 self.assertEqual(store["state"], expected)
                 if expected == "dispatching" and store["fault"]:
                     if fault in {"after_commit", "tampered_commit"}:
@@ -599,8 +678,11 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(hold_reasons[0], f"{reason}_persistence_ambiguous")
 
         faults = (
-            "before_commit", "after_commit", "tampered_commit",
-            "readback_failure", "hold_failure",
+            "before_commit",
+            "after_commit",
+            "tampered_commit",
+            "readback_failure",
+            "hold_failure",
         )
         for route in ("rejection", "invalid_citation"):
             for fault in faults:

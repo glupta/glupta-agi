@@ -57,11 +57,8 @@ def initialize(database_url: str) -> None:
     datasource = SQLAlchemyDatasource.create(database_url, schema="public")
     inspector = sa.inspect(datasource.engine)
     existed = inspector.has_table("crawl_external_effects_v2", schema="public")
-    if (
-        existed
-        and inspector.get_table_comment("crawl_external_effects_v2", schema="public").get("text")
-        != _SCHEMA_VERSION
-    ):
+    if (existed and inspector.get_table_comment(
+            "crawl_external_effects_v2", schema="public").get("text") != _SCHEMA_VERSION):
         raise RuntimeError("external effect schema version is not recognized")
     with datasource.engine.begin() as connection:
         connection.execute(
@@ -82,9 +79,8 @@ def initialize(database_url: str) -> None:
             )
         )
         if not existed:
-            connection.execute(
-                sa.text(f"COMMENT ON TABLE crawl_external_effects_v2 IS '{_SCHEMA_VERSION}'")
-            )
+            connection.execute(sa.text(
+                f"COMMENT ON TABLE crawl_external_effects_v2 IS '{_SCHEMA_VERSION}'"))
     inspector = sa.inspect(datasource.engine)
     inspected_columns = inspector.get_columns("crawl_external_effects_v2", schema="public")
     columns = {
@@ -92,12 +88,9 @@ def initialize(database_url: str) -> None:
         for column in inspected_columns
     }
     primary_key = inspector.get_pk_constraint(
-        "crawl_external_effects_v2", schema="public"
-    ).get("constrained_columns")
-    checks = " ".join(
-        str(check.get("sqltext", ""))
-        for check in inspector.get_check_constraints("crawl_external_effects_v2", schema="public")
-    )
+        "crawl_external_effects_v2", schema="public").get("constrained_columns")
+    checks = " ".join(str(check.get("sqltext", "")) for check in
+        inspector.get_check_constraints("crawl_external_effects_v2", schema="public"))
     if columns != _COLUMNS or primary_key != ["workflow_id"]:
         raise RuntimeError("external effect schema does not match the Crawl contract")
     updated_at = next(column for column in inspected_columns if column["name"] == "updated_at")
@@ -111,7 +104,10 @@ def initialize(database_url: str) -> None:
 
 def _json(value: Any) -> dict[str, Any] | None:
     if isinstance(value, str):
-        value = json.loads(value)
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
     return value if isinstance(value, dict) else None
 
 
@@ -119,38 +115,38 @@ def _effect(row: dict[str, Any]) -> Effect:
     dispatch = _json(row.get("dispatch_json"))
     if row.get("slot_id") != "model-0" or row.get("max_calls") != 1 or dispatch is None:
         raise RuntimeError("external effect row violates the single-call Crawl contract")
+    invalid_dispatch = False
     try:
         frozen = FrozenDispatch.model_validate(dispatch)
     except ValueError:
+        invalid_dispatch = True
+    if invalid_dispatch:
         raise RuntimeError("external effect row has an invalid frozen dispatch") from None
-    if (
-        frozen.model_dump(mode="json") != dispatch
-        or str(row.get("workflow_id")) != frozen.workflow_id
-        or str(row.get("request_digest")) != frozen.request_digest
-        or str(row.get("dispatch_digest")) != frozen.digest()
-        or int(row.get("max_usd_micros", 0)) != frozen.max_usd_micros
-    ):
+    if (frozen.model_dump(mode="json") != dispatch
+            or str(row.get("workflow_id")) != frozen.workflow_id
+            or str(row.get("request_digest")) != frozen.request_digest
+            or str(row.get("dispatch_digest")) != frozen.digest()
+            or int(row.get("max_usd_micros", 0)) != frozen.max_usd_micros):
         raise RuntimeError("external effect row violates the frozen budget")
     result = _json(row.get("result_json"))
     audit = _json(row.get("audit_json"))
     if str(row.get("state")) == "reconciled":
+        invalid_record = False
         try:
-            record = validate_provider_record(
-                ProviderResult.model_validate({"brief": result, "audit": audit})
-            )
+            record = validate_provider_record(ProviderResult.model_validate(
+                {"brief": result, "audit": audit}))
         except ValueError:
+            invalid_record = True
+        if invalid_record:
             raise RuntimeError("external effect result and audit do not match") from None
         provider_audit = record.audit
-        invalid = (
-            provider_audit.workflow_id != frozen.workflow_id,
+        invalid = (provider_audit.workflow_id != frozen.workflow_id,
             provider_audit.request_digest != frozen.request_digest,
             provider_audit.release_profile_digest != frozen.release_profile_digest,
             provider_audit.request_body_digest != frozen.request_body_digest,
             provider_audit.requested_model != frozen.model,
-            provider_audit.returned_model != frozen.model,
-            provider_audit.status != "completed",
-            provider_audit.cost_upper_bound_micros > frozen.max_usd_micros,
-        )
+            provider_audit.returned_model != frozen.model, provider_audit.status != "completed",
+            provider_audit.cost_upper_bound_micros > frozen.max_usd_micros)
         if any(invalid):
             raise RuntimeError("external effect result and audit do not match")
     return Effect(

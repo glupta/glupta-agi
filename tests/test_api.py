@@ -84,6 +84,7 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
             workflow_id,
             profile.model_dump(mode="json"),
             str(key),
+            profile.credential_generation,
             ANY,
         )
         admitted_at = datetime.fromisoformat(enqueue.await_args.args[-1])

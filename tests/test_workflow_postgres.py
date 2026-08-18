@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import tempfile
 import uuid
@@ -15,8 +14,9 @@ from httpx import Request, Response
 from openai import APIStatusError
 
 from glupta_agi import effects, workflow
-from glupta_agi.contracts import EvidenceBrief
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief
 from glupta_agi.effects import AmbiguousEffectError
+from glupta_agi.intake import admit_inline_request, validate_workflow_payload
 from glupta_agi.openai_adapter import OpenAIResponsesAdapter
 from tests.helpers import private_file, provider_audit, release_profile
 
@@ -39,29 +39,37 @@ def _packet(*, credential_file: str = "/private/synthetic-key", near_deadline: b
     admitted_at = datetime.now(UTC)
     if near_deadline:
         admitted_at -= timedelta(seconds=299.5)
-    return workflow._CrawlModelPacket(
-        prompt="question",
+    admitted = admit_inline_request(
+        question="question",
         sources=[{"path": "source.md", "content": "grounded fact"}],
+        disclosure_profile="external_disclosed_v1",
+        disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+        external_disclosure_ack=True,
+    )
+    return workflow._CrawlModelPacket(
+        admitted_request=admitted.workflow_payload(),
         release_profile=release_profile(),
         credential_file=credential_file,
+        credential_generation=1,
         admitted_at=admitted_at,
         workflow_id=workflow_id,
-        request_digest=hashlib.sha256(workflow_id.encode()).hexdigest(),
     )
 
 
 def _prime_dispatch(packet: workflow._CrawlModelPacket):
-    request_body = workflow._request_body(packet.prompt, packet.release_profile)
-    dispatch = workflow._dispatch(packet, request_body)
+    admitted = validate_workflow_payload(packet.admitted_request)
+    request_body = workflow._request_body(
+        workflow.build_user_prompt(admitted.question, packet.admitted_request["sources"]),
+        packet.release_profile,
+    )
+    dispatch = workflow._dispatch(packet, admitted, request_body)
     effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
     effects.transition(packet.workflow_id, "reserved", "dispatching")
-    brief = EvidenceBrief(
-        answer="Grounded.", citations=[], uncertainties=[], next_decisions=[]
-    )
+    brief = EvidenceBrief(answer="Grounded.", citations=[], uncertainties=[], next_decisions=[])
     audit = provider_audit(
         brief,
         workflow_id=packet.workflow_id,
-        request_digest=packet.request_digest,
+        request_digest=admitted.request_digest,
         release_profile_digest=dispatch.release_profile_digest,
         request_body_digest=dispatch.request_body_digest,
     ).model_dump(mode="json")
@@ -153,18 +161,25 @@ def test_retryable_status_is_sticky_unknown_and_replay_never_redispatches(status
 
         client = RejectingClient()
 
-        def adapter_factory(profile: object, credential_file: Path):
+        def adapter_factory(profile: object, credential_file: Path, *, credential_generation: int):
             return OpenAIResponsesAdapter(
                 profile,
                 credential_file,
+                credential_generation=credential_generation,
                 client_factory=lambda **_kwargs: client,
             )
 
         with pytest.raises(AmbiguousEffectError):
             asyncio.run(workflow._run_inference(packet, adapter_factory=adapter_factory))
 
+    admitted = validate_workflow_payload(packet.admitted_request)
     dispatch = workflow._dispatch(
-        packet, workflow._request_body(packet.prompt, packet.release_profile)
+        packet,
+        admitted,
+        workflow._request_body(
+            workflow.build_user_prompt(admitted.question, packet.admitted_request["sources"]),
+            packet.release_profile,
+        ),
     )
     recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
     case = TestCase()
@@ -199,18 +214,25 @@ def test_terminal_rejection_with_cleanup_expiry_is_sticky_unknown() -> None:
 
         client = RejectingSlowCloseClient()
 
-        def adapter_factory(profile: object, credential_file: Path):
+        def adapter_factory(profile: object, credential_file: Path, *, credential_generation: int):
             return OpenAIResponsesAdapter(
                 profile,
                 credential_file,
+                credential_generation=credential_generation,
                 client_factory=lambda **_kwargs: client,
             )
 
         with pytest.raises(AmbiguousEffectError):
             asyncio.run(workflow._run_inference(packet, adapter_factory=adapter_factory))
 
+    admitted = validate_workflow_payload(packet.admitted_request)
     dispatch = workflow._dispatch(
-        packet, workflow._request_body(packet.prompt, packet.release_profile)
+        packet,
+        admitted,
+        workflow._request_body(
+            workflow.build_user_prompt(admitted.question, packet.admitted_request["sources"]),
+            packet.release_profile,
+        ),
     )
     recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
     case = TestCase()

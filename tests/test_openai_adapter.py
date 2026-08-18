@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import time
 import traceback
@@ -9,12 +10,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
 
 import pytest
-from httpx import Request, Response
-from openai import APIStatusError
+from httpx import AsyncClient, MockTransport, Request, Response
+from openai import APIResponseValidationError, APIStatusError, Omit
 
-from glupta_agi.contracts import canonical_digest
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, canonical_digest
 from glupta_agi.inference import FrozenDispatch
 from glupta_agi.openai_adapter import (
     AdapterError,
@@ -43,11 +45,19 @@ def _body() -> dict[str, object]:
 
 
 def _dispatch(body: dict[str, object], **overrides: object) -> FrozenDispatch:
+    profile = release_profile()
     values: dict[str, object] = {
         "workflow_id": "0198be50-0000-7000-8000-000000000000",
         "request_digest": "a" * 64,
         "request_body_digest": canonical_digest(body),
-        "release_profile_digest": release_profile().digest(),
+        "release_profile_digest": profile.digest(),
+        "disclosure_profile": profile.disclosure_profile,
+        "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+        "external_disclosure_ack": True,
+        "project_id": profile.project_id,
+        "service_account_id": profile.service_account_id,
+        "api_key_id": profile.api_key_id,
+        "credential_generation": profile.credential_generation,
         "input_token_upper_bound": 10_000,
         "queue_deadline": "2099-01-01T00:00:00Z",
         "wall_deadline": "2099-01-01T00:00:00Z",
@@ -102,6 +112,14 @@ def _generate(adapter: OpenAIResponsesAdapter, body: dict[str, object], **overri
     return asyncio.run(adapter.generate(_dispatch(body, **overrides), body))
 
 
+def _assert_sanitized(error: Exception, marker: str) -> None:
+    case = TestCase()
+    case.assertIsNone(error.__cause__)
+    case.assertIsNone(error.__context__)
+    case.assertNotIn(marker, repr(vars(error)))
+    case.assertNotIn(marker, "".join(traceback.format_exception(error)))
+
+
 def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None:
     body = _body()
     client = FakeClient(_response())
@@ -113,7 +131,9 @@ def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None
 
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
-        adapter = OpenAIResponsesAdapter(release_profile(), key, client_factory=factory)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, credential_generation=1, client_factory=factory
+        )
         result = _generate(adapter, body)
 
     case = TestCase()
@@ -122,12 +142,80 @@ def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None
     case.assertEqual(constructed["api_key"], "secret-api-key-" + "x" * 32)
     case.assertEqual(constructed["base_url"], "https://api.openai.com/v1")
     case.assertEqual(constructed["max_retries"], 0)
+    case.assertEqual(constructed["organization"], "")
+    case.assertEqual(constructed["project"], "proj_crawl")
+    case.assertEqual(constructed["admin_api_key"], "")
+    default_headers = constructed["default_headers"]
+    case.assertEqual(default_headers["Authorization"], "Bearer secret-api-key-" + "x" * 32)
+    case.assertEqual(default_headers["OpenAI-Project"], "proj_crawl")
+    case.assertIsInstance(default_headers["OpenAI-Organization"], Omit)
     case.assertGreater(constructed["timeout"], 0)
     case.assertLessEqual(constructed["timeout"], 300)
     case.assertIsNotNone(client.request)
     case.assertEqual({key: client.request[key] for key in body}, body)
     case.assertEqual(set(client.request["extra_headers"]), {"X-Client-Request-Id"})
     case.assertTrue(client.closed)
+
+
+def test_official_sdk_wire_headers_are_bound_to_file_key_and_approved_project() -> None:
+    body, captured = _body(), {}
+
+    async def reject(request: Request) -> Response:
+        captured.update(url=str(request.url), headers=dict(request.headers))
+        return Response(
+            400,
+            request=request,
+            json={"error": {"message": "rejected", "type": "invalid_request_error"}},
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "file-api-key-" + "x" * 32)
+        http_client = AsyncClient(transport=MockTransport(reject))
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "glupta_agi.openai_adapter.DefaultAsyncHttpxClient",
+                return_value=http_client,
+            ),
+            pytest.raises(ProviderRejectedError),
+        ):
+            _generate(
+                OpenAIResponsesAdapter(release_profile(), key, credential_generation=1),
+                body,
+            )
+    headers = captured["headers"]
+    case = TestCase()
+    case.assertEqual(captured["url"], "https://api.openai.com/v1/responses")
+    case.assertEqual(headers["authorization"], "Bearer file-api-key-" + "x" * 32)
+    case.assertEqual(headers["openai-project"], "proj_crawl")
+    case.assertNotIn("openai-organization", headers)
+
+
+def test_hostile_openai_environment_is_rejected_before_credential_or_wire() -> None:
+    body = _body()
+    hostile = {
+        "OPENAI_API_KEY": "ambient-credential",
+        "OPENAI_ADMIN_KEY": "ambient-admin",
+        "OPENAI_ORG_ID": "org_ambient",
+        "OPENAI_PROJECT_ID": "proj_ambient",
+        "OPENAI_BASE_URL": "https://example.invalid/v1",
+        "OPENAI_CUSTOM_HEADERS": "Authorization: Bearer ambient\nX-Marker: RAW_AMBIENT",
+    }
+    with (
+        patch.dict(os.environ, hostile, clear=True),
+        patch("glupta_agi.openai_adapter._read_api_key") as read_key,
+        pytest.raises(AdapterError, match="ambient"),
+    ):
+        _generate(
+            OpenAIResponsesAdapter(
+                release_profile(),
+                Path("/never/read"),
+                credential_generation=1,
+                client_factory=lambda **_kwargs: pytest.fail("wire transport constructed"),
+            ),
+            body,
+        )
+    read_key.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -154,6 +242,33 @@ def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None
                 output_tokens_details=SimpleNamespace(reasoning_tokens=0),
             )
         ),
+        _response(
+            usage=SimpleNamespace(
+                input_tokens=True,
+                output_tokens=20,
+                total_tokens=21,
+                input_tokens_details=SimpleNamespace(cached_tokens=0, cache_write_tokens=0),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            )
+        ),
+        _response(
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=1,
+                total_tokens=101,
+                input_tokens_details=SimpleNamespace(cached_tokens=0, cache_write_tokens=0),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=4_000),
+            )
+        ),
+        _response(
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                input_tokens_details=SimpleNamespace(cached_tokens=60, cache_write_tokens=60),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            )
+        ),
     ],
 )
 def test_missing_inconsistent_or_over_budget_usage_is_ambiguous(response: object) -> None:
@@ -161,7 +276,10 @@ def test_missing_inconsistent_or_over_budget_usage_is_ambiguous(response: object
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(
-            release_profile(), key, client_factory=lambda **_kwargs: FakeClient(response)
+            release_profile(),
+            key,
+            credential_generation=1,
+            client_factory=lambda **_kwargs: FakeClient(response),
         )
         with pytest.raises(ProviderAmbiguousError):
             _generate(adapter, body)
@@ -169,21 +287,59 @@ def test_missing_inconsistent_or_over_budget_usage_is_ambiguous(response: object
 
 def test_model_or_schema_rejection_is_definitive_and_audited() -> None:
     body = _body()
-    for response in (
-        _response(model="drifted"),
-        _response(output_text="not-json"),
-        _response(status="failed"),
+    for response, marker in (
+        (_response(model="drifted"), ""),
+        (_response(output_text="RAW_OUTPUT_VALIDATION_MARKER"), "RAW_OUTPUT_VALIDATION_MARKER"),
+        (_response(status="failed"), ""),
     ):
         with tempfile.TemporaryDirectory() as temporary:
             key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
             adapter = OpenAIResponsesAdapter(
                 release_profile(),
                 key,
+                credential_generation=1,
                 client_factory=lambda _response=response, **_kwargs: FakeClient(_response),
             )
             with pytest.raises(ProviderRejectedError) as caught:
                 _generate(adapter, body)
             TestCase().assertIsNotNone(caught.value.audit)
+            if marker:
+                _assert_sanitized(caught.value, marker)
+
+
+def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensitive_object() -> None:
+    marker = "RAW_PROVIDER_VALIDATION_MARKER"
+    body = _body()
+    request = Request("POST", "https://api.openai.com/v1/responses")
+    response = Response(200, request=request)
+    provider_error = APIResponseValidationError(
+        response=response, body={"secret": marker}, message=marker
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        key = private_file(root, "api-key", "file-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(),
+            key,
+            credential_generation=1,
+            client_factory=lambda **_kwargs: FakeClient(provider_error),
+        )
+        with pytest.raises(ProviderAmbiguousError) as caught:
+            _generate(adapter, body)
+        _assert_sanitized(caught.value, marker)
+
+        invalid_key = root / "invalid-key"
+        invalid_key.write_bytes(b"\xffRAW_CREDENTIAL_BYTES" + b"x" * 32)
+        invalid_key.chmod(0o600)
+        invalid_adapter = OpenAIResponsesAdapter(
+            release_profile(),
+            invalid_key,
+            credential_generation=1,
+            client_factory=lambda **_kwargs: pytest.fail("transport constructed"),
+        )
+        with pytest.raises(AdapterError) as invalid_caught:
+            _generate(invalid_adapter, body)
+        _assert_sanitized(invalid_caught.value, "RAW_CREDENTIAL_BYTES")
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
@@ -196,15 +352,14 @@ def test_explicit_terminal_status_error_is_definitive_and_sanitized(status: int)
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(
-            release_profile(), key, client_factory=lambda **_kwargs: client
+            release_profile(), key, credential_generation=1, client_factory=lambda **_kwargs: client
         )
         with pytest.raises(ProviderRejectedError) as caught:
             _generate(adapter, body)
     case = TestCase()
     case.assertEqual(str(caught.value), "OpenAI request was rejected")
     case.assertIsNone(caught.value.audit)
-    case.assertIsNone(caught.value.__cause__)
-    case.assertNotIn("RAW_PROVIDER_BODY", "".join(traceback.format_exception(caught.value)))
+    _assert_sanitized(caught.value, "RAW_PROVIDER_BODY")
     case.assertTrue(client.closed)
 
 
@@ -220,15 +375,14 @@ def test_retryable_or_unclassified_status_error_is_ambiguous_and_sanitized(
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(
-            release_profile(), key, client_factory=lambda **_kwargs: client
+            release_profile(), key, credential_generation=1, client_factory=lambda **_kwargs: client
         )
         with pytest.raises(ProviderAmbiguousError) as caught:
             _generate(adapter, body)
     case = TestCase()
     case.assertEqual(str(caught.value), "OpenAI request outcome is ambiguous")
     case.assertIsNone(caught.value.audit)
-    case.assertIsNone(caught.value.__cause__)
-    case.assertNotIn("RAW_PROVIDER_BODY", "".join(traceback.format_exception(caught.value)))
+    _assert_sanitized(caught.value, "RAW_PROVIDER_BODY")
     case.assertTrue(client.closed)
 
 
@@ -252,7 +406,7 @@ def test_authenticated_status_error_with_expired_cleanup_is_ambiguous() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(
-            release_profile(), key, client_factory=lambda **_kwargs: client
+            release_profile(), key, credential_generation=1, client_factory=lambda **_kwargs: client
         )
         with pytest.raises(ProviderAmbiguousError) as caught:
             _generate(adapter, body, queue_deadline=deadline, wall_deadline=deadline)
@@ -285,7 +439,7 @@ def test_absolute_wall_deadline_cancels_transport_and_closes_client() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(
-            release_profile(), key, client_factory=lambda **_kwargs: client
+            release_profile(), key, credential_generation=1, client_factory=lambda **_kwargs: client
         )
         started = time.monotonic()
         with pytest.raises(ProviderAmbiguousError):
@@ -309,7 +463,7 @@ def test_cleanup_only_deadline_is_ambiguous_with_response_receipt_time() -> None
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(
-            release_profile(), key, client_factory=lambda **_kwargs: client
+            release_profile(), key, credential_generation=1, client_factory=lambda **_kwargs: client
         )
         with pytest.raises(ProviderAmbiguousError) as caught:
             _generate(
@@ -333,11 +487,26 @@ def test_profile_request_and_credential_drift_reject_without_transport() -> None
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         key = private_file(root, "api-key", "secret-api-key-" + "x" * 32)
-        adapter = OpenAIResponsesAdapter(release_profile(), key, client_factory=factory)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, credential_generation=1, client_factory=factory
+        )
         with pytest.raises(AdapterError):
             _generate(adapter, body, release_profile_digest="f" * 64)
         with pytest.raises(AdapterError):
             asyncio.run(adapter.generate(_dispatch(body), {**body, "store": True}))
+        for field, value in (
+            ("project_id", "proj_other"),
+            ("api_key_id", "key_other"),
+            ("credential_generation", 2),
+            ("external_disclosure_ack", False),
+        ):
+            with pytest.raises((AdapterError, ValueError)):
+                _generate(adapter, body, **{field: value})
+        mismatched_generation = OpenAIResponsesAdapter(
+            release_profile(), key, credential_generation=2, client_factory=factory
+        )
+        with pytest.raises(AdapterError, match="identity"):
+            _generate(mismatched_generation, body)
         key.chmod(0o640)
         with pytest.raises(AdapterError):
             _generate(adapter, body)
@@ -348,7 +517,7 @@ def test_profile_request_and_credential_drift_reject_without_transport() -> None
         )
         with pytest.raises(AdapterError, match="expired"):
             asyncio.run(
-                OpenAIResponsesAdapter(expired, key, client_factory=factory).generate(
-                    _dispatch(body, release_profile_digest=expired.digest()), body
-                )
+                OpenAIResponsesAdapter(
+                    expired, key, credential_generation=1, client_factory=factory
+                ).generate(_dispatch(body, release_profile_digest=expired.digest()), body)
             )

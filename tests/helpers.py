@@ -85,7 +85,7 @@ def provider_audit(
         "output_tokens": 20,
         "reasoning_tokens": 5,
         "total_tokens": 120,
-        "cost_upper_bound_micros": 1_100,
+        "cost_upper_bound_micros": 1_225,
         "request_body_digest": "b" * 64,
         "output_digest": "c" * 64,
         "validated_result_digest": canonical_digest(result.model_dump(mode="json")),

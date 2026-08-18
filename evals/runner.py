@@ -13,11 +13,11 @@ from typing import Any
 from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorContext
 
-from glupta_agi.brief import build_user_prompt
 from glupta_agi.client import _uuid7
-from glupta_agi.contracts import EvidenceBrief
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief
 from glupta_agi.effects import initialize
 from glupta_agi.inference import PINNED_MODEL
+from glupta_agi.intake import admit_inline_request
 from glupta_agi.settings import Settings
 from glupta_agi.workflow import _CrawlModelPacket, _run_inference
 
@@ -128,27 +128,33 @@ def load_dataset(
     return Dataset(name="evidence_brief_v1", cases=cases, evaluators=[GroundedBriefEvaluator()])
 
 
-def run_eval(dataset: Dataset[EvalInput, EvidenceBrief, EvalExpected]) -> Any:
+def run_eval(
+    dataset: Dataset[EvalInput, EvidenceBrief, EvalExpected],
+    *,
+    external_disclosure_ack: bool = False,
+) -> Any:
+    if external_disclosure_ack is not True:
+        raise ValueError("external disclosure acknowledgement is required")
     settings = Settings.from_environment()
     initialize(settings.dbos_system_database_url())
-    profile, credential_file = settings.require_external_profile()
+    profile, credential_file, credential_generation = settings.require_external_profile()
 
     async def generate(item: EvalInput) -> EvidenceBrief:
+        admitted = admit_inline_request(
+            question=item.question,
+            sources=item.sources,
+            disclosure_profile="external_disclosed_v1",
+            disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+            external_disclosure_ack=external_disclosure_ack,
+        )
         result, _usage = await _run_inference(
             _CrawlModelPacket(
-                prompt=build_user_prompt(item.question, item.sources),
-                sources=item.sources,
+                admitted_request=admitted.workflow_payload(),
                 release_profile=profile,
                 credential_file=str(credential_file),
+                credential_generation=credential_generation,
                 admitted_at=datetime.now(UTC),
                 workflow_id=_uuid7(),
-                request_digest=hashlib.sha256(
-                    json.dumps(
-                        {"question": item.question, "sources": item.sources},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ).hexdigest(),
             )
         )
         return result.brief
@@ -198,6 +204,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--case", action="append", dest="cases")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ack-external-disclosure", action="store_true")
     return parser
 
 
@@ -206,7 +213,7 @@ def main() -> None:
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be at least 1")
     dataset = load_dataset(args.dataset, case_names=set(args.cases or []), limit=args.limit)
-    report = run_eval(dataset)
+    report = run_eval(dataset, external_disclosure_ack=args.ack_external_disclosure)
     print(report.render(include_reasons=True))
     receipt = build_receipt(report, args.dataset)
     args.output.parent.mkdir(parents=True, exist_ok=True)

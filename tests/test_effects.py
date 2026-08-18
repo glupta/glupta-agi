@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from glupta_agi.contracts import (
+    DISCLOSURE_NOTICE_DIGEST,
     EvidenceBrief,
     ProviderAudit,
     canonical_digest,
@@ -23,6 +24,13 @@ def _row(**overrides: object) -> dict[str, object]:
         request_digest="a" * 64,
         request_body_digest="c" * 64,
         release_profile_digest="d" * 64,
+        disclosure_profile="external_disclosed_v1",
+        disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+        external_disclosure_ack=True,
+        project_id="proj_crawl",
+        service_account_id="svc_crawl",
+        api_key_id="key_crawl",
+        credential_generation=1,
         input_token_upper_bound=1_000,
         queue_deadline="2099-01-01T00:00:00Z",
         wall_deadline="2099-01-01T00:00:00Z",
@@ -68,7 +76,8 @@ def test_effect_row_rejects_call_or_budget_drift(overrides: dict[str, object]) -
 def test_effect_row_retains_frozen_dispatch_result_and_audit() -> None:
     effect = _effect(
         _row(
-            result_json={"answer": "grounded"}, audit_json={"total_tokens": 10},
+            result_json={"answer": "grounded"},
+            audit_json={"total_tokens": 10},
             hold_reason="provider_rejected",
         )
     )

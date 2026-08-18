@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -149,6 +150,43 @@ class SettingsTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(SettingsError, "generation"):
             settings.require_external_profile()
+
+    def test_invalid_private_bytes_and_noncanonical_generation_are_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            token = root / "intake-token"
+            token.write_bytes(b"\xffRAW_PRIVATE_BYTES" + b"x" * 32)
+            token.chmod(0o600)
+            with (
+                patch.dict(os.environ, {"GLUPTA_INTAKE_TOKEN_FILE": str(token)}, clear=True),
+                self.assertRaises(SettingsError) as caught,
+            ):
+                Settings.from_environment()
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertIsNone(caught.exception.__context__)
+            self.assertNotIn(
+                "RAW_PRIVATE_BYTES", "".join(traceback.format_exception(caught.exception))
+            )
+
+            valid_token = private_file(root, "valid-token", "t" * 32)
+            profile_path = write_profile(root)
+            key = private_file(root, "api-key", "secret-api-key-" + "x" * 32)
+            base = {
+                "GLUPTA_INTAKE_TOKEN_FILE": str(valid_token),
+                "GLUPTA_RELEASE_PROFILE_FILE": str(profile_path),
+                "GLUPTA_OPENAI_API_KEY_FILE": str(key),
+            }
+            for generation in ("01", "+1", " 1"):
+                with (
+                    self.subTest(generation=generation),
+                    patch.dict(
+                        os.environ,
+                        {**base, "GLUPTA_CREDENTIAL_GENERATION": generation},
+                        clear=True,
+                    ),
+                    self.assertRaisesRegex(SettingsError, "generation"),
+                ):
+                    Settings.from_environment()
 
     def test_database_must_be_local_postgresql(self) -> None:
         settings = Settings(input_root=Path("/inputs"), token="t" * 32)
