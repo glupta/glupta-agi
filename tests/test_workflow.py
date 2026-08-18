@@ -1,460 +1,279 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import tempfile
 import traceback
 import unittest
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
 
-from codex_cli_bin import bundled_codex_path
-from openai_codex import TransportClosedError
-from pydantic import TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart
-from pydantic_ai.usage import RequestUsage
 
-from glupta_agi.contracts import EvidenceBrief
+from glupta_agi.client import _uuid7
+from glupta_agi.contracts import Citation, EvidenceBrief
 from glupta_agi.effects import AmbiguousEffectError, Effect
+from glupta_agi.inference import ProviderAudit, ProviderResult
+from glupta_agi.openai_adapter import ProviderAmbiguousError, ProviderRejectedError
 from glupta_agi.workflow import (
     BriefGenerationError,
     _crawl_agent,
     _crawl_durability,
-    _crawl_model,
-    _run_codex,
+    _CrawlModelPacket,
+    _run_inference,
     crawl_observe_queue,
 )
+from tests.helpers import release_profile
 
 
-def _effect(state: str, result: dict[str, object] | None = None) -> Effect:
-    return Effect(
-        workflow_id="workflow-1",
-        request_digest="digest-1",
-        model_name="gpt-5.6-sol",
-        state=state,
-        thread_id="thread-1" if state in {"thread_started", "turn_started"} else None,
-        turn_id="turn-1" if state == "turn_started" else None,
-        result=result,
+def _packet(
+    *,
+    prompt: str = "question",
+    workflow_id: str | None = None,
+    admitted_at: datetime | None = None,
+) -> _CrawlModelPacket:
+    return _CrawlModelPacket(
+        prompt=prompt,
+        sources=[{"path": "source.md", "content": "grounded fact"}],
+        release_profile=release_profile(),
+        credential_file="/private/api-key",
+        admitted_at=admitted_at or datetime.now(UTC),
+        workflow_id=workflow_id or _uuid7(),
+        request_digest="a" * 64,
     )
+
+
+def _audit(**overrides: object) -> ProviderAudit:
+    values: dict[str, object] = {
+        "client_request_id": "0198be50-0000-7000-8000-000000000000",
+        "provider_request_id": "req_1",
+        "response_id": "resp_1",
+        "requested_model": "gpt-5.6-sol",
+        "returned_model": "gpt-5.6-sol",
+        "status": "completed",
+        "input_tokens": 100,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 20,
+        "reasoning_tokens": 5,
+        "total_tokens": 120,
+        "cost_upper_bound_micros": 1_100,
+        "request_body_digest": "b" * 64,
+        "output_digest": "c" * 64,
+        "validated_result_digest": "d" * 64,
+        "started_at": datetime.now(UTC),
+        "completed_at": datetime.now(UTC),
+    }
+    values.update(overrides)
+    return ProviderAudit.model_validate(values)
+
+
+def _effect(state: str, dispatch: dict[str, object], **overrides: object) -> Effect:
+    values: dict[str, object] = {
+        "workflow_id": str(dispatch["workflow_id"]),
+        "request_digest": str(dispatch["request_digest"]),
+        "dispatch_digest": "e" * 64,
+        "state": state,
+        "dispatch": dispatch,
+        "result": None,
+        "audit": None,
+    }
+    values.update(overrides)
+    return Effect(**values)  # type: ignore[arg-type]
+
+
+def _reserve(state: str = "reserved", **overrides: object):
+    def reserve(dispatch: dict[str, object], _digest: str) -> Effect:
+        return _effect(state, dispatch, **overrides)
+
+    return reserve
 
 
 def _transition(
     workflow_id: str,
-    expected: str,
+    _expected: str,
     state: str,
     **kwargs: object,
 ) -> Effect:
-    del workflow_id, expected
     return Effect(
-        workflow_id="workflow-1",
-        request_digest="digest-1",
-        model_name="gpt-5.6-sol",
+        workflow_id=workflow_id,
+        request_digest="a" * 64,
+        dispatch_digest="e" * 64,
         state=state,
-        thread_id=str(kwargs.get("thread_id") or "thread-1"),
-        turn_id=str(kwargs.get("turn_id") or "turn-1"),
+        dispatch={"workflow_id": workflow_id, "request_digest": "a" * 64},
         result=kwargs.get("result") if isinstance(kwargs.get("result"), dict) else None,
+        audit=kwargs.get("audit") if isinstance(kwargs.get("audit"), dict) else None,
     )
 
 
-class FakeTurn:
-    id = "turn-1"
+class FakeAdapter:
+    request_body: dict[str, object] | None = None
+    dispatch: object = None
 
-    def __init__(self, final_response: str, usage: object | None = None) -> None:
-        self._final_response = final_response
-        self._usage = usage
+    def __init__(self, _profile: object, _credential: Path) -> None:
+        pass
 
-    def run(self) -> SimpleNamespace:
-        return SimpleNamespace(
-            status=SimpleNamespace(value="completed"),
-            final_response=self._final_response,
-            usage=self._usage,
+    def generate(self, dispatch: object, request_body: dict[str, object]) -> ProviderResult:
+        type(self).request_body = request_body
+        type(self).dispatch = dispatch
+        return ProviderResult(
+            brief=EvidenceBrief(
+                answer="Grounded.",
+                citations=[Citation(path="source.md", line_start=1, line_end=1, quote="wrong")],
+                uncertainties=[],
+                next_decisions=[],
+            ),
+            audit=_audit(
+                request_body_digest=request_body["model"] and dispatch.request_body_digest
+            ),
         )
 
 
-class FakeThread:
-    id = "thread-1"
-
-    def __init__(self, final_response: str, usage: object | None = None) -> None:
-        self._final_response = final_response
-        self._usage = usage
-        self.turn_kwargs: dict[str, object] = {}
-
-    def turn(self, prompt: str, **kwargs: object) -> FakeTurn:
-        self.turn_kwargs = {"prompt": prompt, **kwargs}
-        return FakeTurn(self._final_response, self._usage)
-
-
-class FakeClient:
-    def __init__(self, final_response: str, usage: object | None = None) -> None:
-        self.thread = FakeThread(final_response, usage)
-        self.start_kwargs: dict[str, object] = {}
-        self.closed = False
-
-    def thread_start(self, **kwargs: object) -> FakeThread:
-        self.start_kwargs = kwargs
-        return self.thread
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class CodexBriefTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._codex_home = tempfile.TemporaryDirectory(prefix="glupta-test-codex-")
-        self.codex_home = self._codex_home.name
-
-    def tearDown(self) -> None:
-        self._codex_home.cleanup()
-
-    def test_crawl_model_work_is_bounded_by_one_dbos_queue_slot(self) -> None:
-        self.assertEqual(crawl_observe_queue.name, "crawl-observe-v1")
+class WorkflowTests(unittest.TestCase):
+    def test_queue_agent_and_retry_contract_are_fixed(self) -> None:
         self.assertEqual(crawl_observe_queue.concurrency, 1)
         self.assertEqual(crawl_observe_queue.worker_concurrency, 1)
-
-    def test_runtime_uses_native_pydantic_ai_dbos_durability_without_retries(self) -> None:
         self.assertIsInstance(_crawl_agent, Agent)
         self.assertIsInstance(_crawl_durability, DBOSDurability)
         self.assertEqual(_crawl_durability._model_step_config, {"retries_allowed": False})
-        self.assertFalse(_crawl_durability._register_legacy_workflows)
 
-    def test_native_model_response_retains_usage_through_pydantic_serialization(self) -> None:
-        packet = json.dumps(
-            {
-                "prompt": "question",
-                "sources": [],
-                "codex_home": self.codex_home,
-                "model_name": "gpt-5.6-sol",
-                "workflow_id": "workflow-1",
-                "request_digest": "digest-1",
-            }
-        )
-        brief = EvidenceBrief(answer="Grounded.", citations=[], uncertainties=[], next_decisions=[])
-        usage = RequestUsage(input_tokens=120, cache_read_tokens=20, output_tokens=30)
-        with patch("glupta_agi.workflow._run_codex", return_value=(brief, usage)):
-            response = _crawl_model(
-                [ModelRequest(parts=[UserPromptPart(content=packet)])],
-                Mock(),
-            )
-
-        adapter = TypeAdapter(ModelResponse)
-        restored = adapter.validate_json(adapter.dump_json(response))
-        self.assertEqual(restored.usage, usage)
-
-    def test_runs_fenced_secondary_codex_without_tools_and_resolves_quote(self) -> None:
-        usage = SimpleNamespace(
-            last=SimpleNamespace(
-                input_tokens=120,
-                cached_input_tokens=20,
-                output_tokens=30,
-                reasoning_output_tokens=12,
-            )
-        )
-        client = FakeClient(
-            json.dumps(
-                {
-                    "answer": "Grounded answer.",
-                    "citations": [
-                        {
-                            "path": "compose.txt",
-                            "line_start": 1,
-                            "line_end": 1,
-                            "quote": "model quote",
-                        }
-                    ],
-                    "uncertainties": [],
-                    "next_decisions": [],
-                }
-            ),
-            usage,
-        )
+    def test_success_uses_gpt56_medium_exact_body_and_persists_usage(self) -> None:
         with (
-            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
             patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
         ):
-            result, request_usage = _run_codex(
-                "question",
-                [{"path": "compose.txt", "content": "services:"}],
-                self.codex_home,
-                "gpt-5.6-sol",
-                "workflow-1",
-                "digest-1",
-                codex_factory=lambda config: client,
-            )
+            brief, usage = _run_inference(_packet(), adapter_factory=FakeAdapter)
 
-        self.assertEqual(result.citations[0].quote, "services:")
-        self.assertEqual(request_usage.input_tokens, 120)
-        self.assertEqual(request_usage.cache_read_tokens, 20)
-        self.assertEqual(request_usage.output_tokens, 30)
-        self.assertEqual(request_usage.details, {"reasoning_output_tokens": 12})
-        self.assertIsNone(request_usage.cost)
-        self.assertTrue(client.start_kwargs["ephemeral"])
-        self.assertEqual(client.start_kwargs["model"], "gpt-5.6-sol")
-        config = client.start_kwargs["config"]
-        self.assertIsInstance(config, dict)
-        self.assertEqual(config["features"]["shell_tool"], False)
-        self.assertEqual(config["web_search"], "disabled")
-        self.assertEqual(config["model_provider"], "crawl_openai")
-        self.assertEqual(config["model_providers"]["crawl_openai"]["request_max_retries"], 0)
-        self.assertEqual(config["model_providers"]["crawl_openai"]["stream_max_retries"], 0)
-        self.assertEqual(client.thread.turn_kwargs["effort"].value, "medium")
-        self.assertTrue(client.closed)
+        self.assertEqual(brief.citations[0].quote, "grounded fact")
+        self.assertEqual(usage.input_tokens, 100)
+        self.assertEqual(usage.details["reasoning_output_tokens"], 5)
+        body = FakeAdapter.request_body
+        self.assertIsNotNone(body)
+        self.assertEqual(body["model"], "gpt-5.6-sol")
+        self.assertEqual(body["reasoning"], {"effort": "medium"})
+        self.assertEqual(body["tools"], [])
+        self.assertEqual(body["tool_choice"], "none")
+        self.assertFalse(body["store"])
+        self.assertFalse(body["stream"])
         self.assertEqual(
             [call.args[2] for call in transition.call_args_list],
-            ["dispatching", "thread_started", "turn_started", "returned", "reconciled"],
+            ["dispatching", "returned", "reconciled"],
         )
 
-    def test_codex_launch_discards_ambient_environment(self) -> None:
-        client = FakeClient(
-            json.dumps(
-                {
-                    "answer": "Grounded answer.",
-                    "citations": [],
-                    "uncertainties": [],
-                    "next_decisions": [],
-                }
-            )
-        )
-        captured_config: list[object] = []
-        state_home_existed_during_launch: list[bool] = []
+    def test_replay_returns_recorded_result_and_exact_usage_without_adapter(self) -> None:
+        recorded = EvidenceBrief(
+            answer="Grounded.",
+            citations=[Citation(path="source.md", line_start=1, line_end=1, quote="grounded fact")],
+            uncertainties=[],
+            next_decisions=[],
+        ).model_dump(mode="json")
+        factory = Mock()
+        with patch(
+            "glupta_agi.workflow.reserve",
+            side_effect=_reserve(
+                "reconciled", result=recorded, audit=_audit().model_dump(mode="json")
+            ),
+        ):
+            brief, usage = _run_inference(_packet(), adapter_factory=factory)
+        self.assertEqual(brief.answer, "Grounded.")
+        self.assertEqual(usage.output_tokens, 20)
+        self.assertEqual(usage.details["cost_upper_bound_micros"], 1_100)
+        factory.assert_not_called()
 
-        def factory(config: object) -> FakeClient:
-            captured_config.append(config)
-            launch_args = config.launch_args_override
-            codex_index = launch_args.index(str(bundled_codex_path()))
-            state_argument = launch_args[codex_index + 6]
-            state_home = json.loads(state_argument.removeprefix("sqlite_home="))
-            state_home_existed_during_launch.append(os.path.isdir(state_home))
-            return client
-
-        sentinel = "CRAWL_TEST_SENTINEL_SECRET"
+    def test_queue_deadline_uses_server_admission_not_caller_uuid_time(self) -> None:
+        admitted_at = datetime.now(UTC) - timedelta(seconds=1)
+        future_uuid = "ffffffff-ffff-7fff-bfff-ffffffffffff"
         with (
-            patch.dict(os.environ, {sentinel: "must-not-leak"}),
-            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
             patch("glupta_agi.workflow.transition", side_effect=_transition),
         ):
-            _run_codex(
-                "question",
-                [{"path": "compose.txt", "content": "services:"}],
-                self.codex_home,
-                "gpt-5.6-sol",
-                "workflow-1",
-                "digest-1",
-                codex_factory=factory,
+            _run_inference(
+                _packet(workflow_id=future_uuid, admitted_at=admitted_at),
+                adapter_factory=FakeAdapter,
             )
-
-        self.assertEqual(len(captured_config), 1)
-        sdk_config = captured_config[0]
-        self.assertIsNone(sdk_config.env)
-        launch_args = sdk_config.launch_args_override
-        self.assertIsNotNone(launch_args)
-        self.assertEqual(launch_args[1], "-i")
-        codex_index = launch_args.index(str(bundled_codex_path()))
-        assignments = dict(assignment.split("=", 1) for assignment in launch_args[2:codex_index])
-        self.assertNotIn(sentinel, assignments)
         self.assertEqual(
-            set(assignments),
-            {
-                "CODEX_HOME",
-                "HOME",
-                "LANG",
-                "PATH",
-                "STUDIO_CODEX_SESSION_ORIGIN",
-                "TMPDIR",
-            },
+            FakeAdapter.dispatch.queue_deadline,
+            admitted_at + timedelta(seconds=300),
         )
-        self.assertEqual(
-            launch_args[codex_index + 1 : codex_index + 6],
-            (
-                "-c",
-                'cli_auth_credentials_store="file"',
-                "-c",
-                'history.persistence="none"',
-                "-c",
-            ),
-        )
-        state_argument = launch_args[codex_index + 6]
-        self.assertTrue(state_argument.startswith(f'sqlite_home="{self.codex_home}/'))
-        self.assertTrue(state_argument.endswith('"'))
-        state_home = json.loads(state_argument.removeprefix("sqlite_home="))
-        self.assertEqual(state_home_existed_during_launch, [True])
-        self.assertFalse(os.path.exists(state_home))
-        self.assertNotIn("log_dir", " ".join(launch_args))
-        self.assertEqual(
-            launch_args[codex_index + 7 :],
-            (
-                "app-server",
-                "--disable",
-                "apps",
-                "--disable",
-                "plugins",
-                "--disable",
-                "remote_plugin",
-                "--listen",
-                "stdio://",
-            ),
-        )
-        probe = subprocess.run(  # noqa: S603 -- launcher is resolved from os.defpath
-            [*launch_args[:codex_index], launch_args[0]],
-            check=True,
-            capture_output=True,
-            env={**os.environ, sentinel: "must-not-leak"},
-            text=True,
-        )
-        child_environment = dict(line.split("=", 1) for line in probe.stdout.splitlines())
-        self.assertEqual(child_environment, assignments)
-        self.assertNotIn(sentinel, child_environment)
 
-    def test_replay_returns_recorded_result_without_provider_call(self) -> None:
-        recorded = {
-            "answer": "Grounded answer.",
-            "citations": [
-                {"path": "compose.txt", "line_start": 1, "line_end": 1, "quote": "services:"}
-            ],
-            "uncertainties": [],
-            "next_decisions": [],
-        }
-        factory = Mock()
-        with patch("glupta_agi.workflow.reserve", return_value=_effect("reconciled", recorded)):
-            result, request_usage = _run_codex(
-                "question",
-                [{"path": "compose.txt", "content": "services:"}],
-                self.codex_home,
-                "gpt-5.6-sol",
-                "workflow-1",
-                "digest-1",
-                codex_factory=factory,
-            )
-
-        self.assertEqual(result.answer, "Grounded answer.")
-        self.assertEqual(request_usage.details, {"sdk_usage_unavailable": 1})
-        self.assertTrue(request_usage.has_values())
-        self.assertIsNone(request_usage.cost)
-        factory.assert_not_called()
-        self.assertEqual(os.listdir(self.codex_home), [])
-
-    def test_ambiguous_dispatch_is_held_without_second_provider_call(self) -> None:
+    def test_ambiguous_recovery_never_redispatches(self) -> None:
         factory = Mock()
         with (
-            patch("glupta_agi.workflow.reserve", return_value=_effect("dispatching")),
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve("dispatching")),
             patch(
                 "glupta_agi.workflow.hold_unknown",
                 side_effect=AmbiguousEffectError("manual reconciliation required"),
             ),
+            self.assertRaises(AmbiguousEffectError),
         ):
-            with self.assertRaises(AmbiguousEffectError):
-                _run_codex(
-                    "question",
-                    [{"path": "compose.txt", "content": "services:"}],
-                    self.codex_home,
-                    "gpt-5.6-sol",
-                    "workflow-1",
-                    "digest-1",
-                    codex_factory=factory,
-                )
+            _run_inference(_packet(), adapter_factory=factory)
         factory.assert_not_called()
 
-    def test_invalid_typed_output_is_terminal_not_retried(self) -> None:
-        sentinel = "CRAWL_INVALID_OUTPUT_SENTINEL"
-        client = FakeClient(json.dumps({"answer": sentinel}))
+    def test_expired_queue_and_oversized_prompt_reject_before_adapter(self) -> None:
+        factory = Mock()
         with (
-            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
             patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+            self.assertRaisesRegex(BriefGenerationError, "queue deadline"),
         ):
-            with self.assertRaises(BriefGenerationError) as caught:
-                _run_codex(
-                    "question",
-                    [{"path": "compose.txt", "content": "services:"}],
-                    self.codex_home,
-                    "gpt-5.6-sol",
-                    "workflow-1",
-                    "digest-1",
-                    codex_factory=lambda config: client,
+            _run_inference(
+                _packet(admitted_at=datetime.now(UTC) - timedelta(seconds=301)),
+                adapter_factory=factory,
+            )
+        factory.assert_not_called()
+        self.assertEqual(transition.call_args.args[2], "failed")
+
+        for invalid_admission in (
+            datetime.now() + timedelta(seconds=10),
+            datetime.now(UTC) + timedelta(seconds=10),
+        ):
+            with (
+                self.subTest(admitted_at=invalid_admission),
+                patch("glupta_agi.workflow.reserve") as reserve,
+                self.assertRaisesRegex(BriefGenerationError, "admission timestamp"),
+            ):
+                _run_inference(
+                    _packet(admitted_at=invalid_admission),
+                    adapter_factory=factory,
                 )
-
-        self.assertEqual(transition.call_args_list[-1].args[2], "failed")
-        self.assertIsNone(caught.exception.__context__)
-        rendered = "".join(traceback.format_exception(caught.exception))
-        self.assertNotIn(sentinel, rendered)
-
-    def test_provider_error_is_held_with_sanitized_token_and_no_raw_context(self) -> None:
-        sentinel = "CRAWL_PROVIDER_ERROR_SENTINEL"
-
-        class FailingClient(FakeClient):
-            def thread_start(self, **kwargs: object) -> FakeThread:
-                del kwargs
-                raise TransportClosedError(sentinel)
-
-        client = FailingClient("")
-        factory = Mock(return_value=client)
-        held: list[tuple[Effect, str]] = []
-
-        def sanitized_hold(effect: Effect, reason: str) -> None:
-            held.append((effect, reason))
-            raise AmbiguousEffectError("model effect requires reconciliation")
+            reserve.assert_not_called()
 
         with (
-            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
-            patch("glupta_agi.workflow.transition", side_effect=_transition),
-            patch("glupta_agi.workflow.hold_unknown", side_effect=sanitized_hold),
+            patch("glupta_agi.workflow.reserve") as reserve,
+            self.assertRaisesRegex(BriefGenerationError, "input-token"),
         ):
-            with self.assertRaises(AmbiguousEffectError) as caught:
-                _run_codex(
-                    "question",
-                    [{"path": "compose.txt", "content": "services:"}],
-                    self.codex_home,
-                    "gpt-5.6-sol",
-                    "workflow-1",
-                    "digest-1",
-                    codex_factory=factory,
-                )
+            _run_inference(_packet(prompt="x" * 280_000), adapter_factory=factory)
+        reserve.assert_not_called()
 
-        factory.assert_called_once()
-        self.assertTrue(client.closed)
-        self.assertEqual(len(held), 1)
-        self.assertEqual(held[0][1], "provider_transport_closed_after_dispatching")
-        self.assertIsNone(caught.exception.__context__)
-        rendered = "".join(traceback.format_exception(caught.exception))
-        self.assertNotIn(sentinel, str(caught.exception))
-        self.assertNotIn(sentinel, repr(caught.exception))
-        self.assertNotIn(sentinel, rendered)
-        self.assertEqual(os.listdir(self.codex_home), [])
+    def test_ambiguous_provider_failure_is_redacted_and_sticky(self) -> None:
+        sentinel = "RAW_PROVIDER_MARKER"
 
-    def test_pre_turn_value_error_is_provider_failure_not_invalid_output(self) -> None:
-        sentinel = "CRAWL_PROVIDER_VALUE_ERROR_SENTINEL"
+        class FailingAdapter(FakeAdapter):
+            def generate(self, _dispatch: object, _body: dict[str, object]) -> ProviderResult:
+                raise ProviderAmbiguousError(sentinel)
 
-        class FailingClient(FakeClient):
-            def thread_start(self, **kwargs: object) -> FakeThread:
-                del kwargs
-                raise ValueError(sentinel)
-
-        client = FailingClient("")
-        held: list[str] = []
-
-        def sanitized_hold(effect: Effect, reason: str) -> None:
-            del effect
-            held.append(reason)
-            raise AmbiguousEffectError("model effect requires reconciliation")
+        def hold(_effect: Effect, reason: str) -> None:
+            self.assertEqual(reason, "provider_outcome_ambiguous")
+            raise AmbiguousEffectError("manual reconciliation required")
 
         with (
-            patch("glupta_agi.workflow.reserve", return_value=_effect("reserved")),
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
             patch("glupta_agi.workflow.transition", side_effect=_transition),
-            patch("glupta_agi.workflow.hold_unknown", side_effect=sanitized_hold),
+            patch("glupta_agi.workflow.hold_unknown", side_effect=hold),
+            self.assertRaises(AmbiguousEffectError) as caught,
         ):
-            with self.assertRaises(AmbiguousEffectError) as caught:
-                _run_codex(
-                    "question",
-                    [{"path": "compose.txt", "content": "services:"}],
-                    self.codex_home,
-                    "gpt-5.6-sol",
-                    "workflow-1",
-                    "digest-1",
-                    codex_factory=lambda config: client,
-                )
-
-        self.assertTrue(client.closed)
-        self.assertEqual(held, ["provider_error_after_dispatching"])
-        self.assertIsNone(caught.exception.__context__)
+            _run_inference(_packet(), adapter_factory=FailingAdapter)
         self.assertNotIn(sentinel, "".join(traceback.format_exception(caught.exception)))
+
+    def test_definitive_rejection_is_failed_without_retry(self) -> None:
+        class RejectingAdapter(FakeAdapter):
+            def generate(self, _dispatch: object, _body: dict[str, object]) -> ProviderResult:
+                raise ProviderRejectedError("invalid output", _audit())
+
+        with (
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
+            patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+            self.assertRaisesRegex(BriefGenerationError, "rejected"),
+        ):
+            _run_inference(_packet(), adapter_factory=RejectingAdapter)
+        self.assertEqual(transition.call_args.args[2], "failed")
+        self.assertIsNotNone(transition.call_args.kwargs["audit"])

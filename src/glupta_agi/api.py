@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from dbos import DBOS, SetWorkflowID
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -13,7 +14,7 @@ from .intake import IntakeError, load_request
 from .settings import Settings, get_settings
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.2.10", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version="0.3.0", docs_url=None, redoc_url=None)
 
 
 def _bearer(authorization: str | None, settings: Settings) -> None:
@@ -38,7 +39,12 @@ def _workflow_id(raw: str | None) -> str:
 
 @app.get("/healthz")
 async def health() -> dict[str, str]:
-    return {"status": "healthy", "stage": "Crawl", "actions": "disabled"}
+    return {
+        "status": "healthy",
+        "stage": "Crawl",
+        "actions": "disabled",
+        "inference": "external_disclosed_v1",
+    }
 
 
 @app.post("/v1/evidence-brief", response_model=EvidenceBriefResponse)
@@ -55,18 +61,23 @@ async def evidence_brief(
             input_root=settings.input_root,
             question=request.question,
             selected_paths=request.files,
+            disclosure_profile=request.disclosure_profile,
+            disclosure_notice_digest=request.disclosure_notice_digest,
+            external_disclosure_ack=request.external_disclosure_ack,
         )
     except IntakeError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
     payload = canonical.workflow_payload()
     with SetWorkflowID(workflow_id):
+        profile, credential_file = settings.require_external_profile()
         handle = await crawl_observe_queue.enqueue_async(
             evidence_brief_workflow,
             payload,
             workflow_id,
-            str(settings.codex_home),
-            settings.codex_model,
+            profile.model_dump(mode="json"),
+            str(credential_file),
+            datetime.now(UTC).isoformat(),
         )
 
     recorded = await DBOS.get_workflow_status_async(workflow_id)

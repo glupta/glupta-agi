@@ -14,7 +14,7 @@ def main() -> None:
     settings = get_settings()
     config: DBOSConfig = {
         "name": "glupta-agi-crawl",
-        "application_version": "0.2.10",
+        "application_version": "0.3.0",
         "system_database_url": settings.dbos_system_database_url(),
     }
     DBOS(config=config)

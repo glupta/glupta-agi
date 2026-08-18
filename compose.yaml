@@ -4,26 +4,40 @@ services:
   app:
     build: .
     restart: unless-stopped
-    user: "${GLUPTA_UID:-501}:${GLUPTA_GID:-20}"
+    user: "${GLUPTA_UID:?set GLUPTA_UID}:${GLUPTA_GID:?set GLUPTA_GID}"
     environment:
       GLUPTA_INPUT_ROOT: /data/inputs
       GLUPTA_INTAKE_TOKEN_FILE: /run/private/intake-token
       GLUPTA_POSTGRES_PASSWORD_FILE: /run/private/postgres-password
       GLUPTA_POSTGRES_HOST: postgres
       GLUPTA_POSTGRES_PORT: 5432
-      GLUPTA_CODEX_HOME: /run/codex
+      GLUPTA_RELEASE_PROFILE_FILE: /run/private/release-profile.json
+      GLUPTA_OPENAI_API_KEY_FILE: /run/private/openai-api-key
+      GLUPTA_CREDENTIAL_GENERATION: ${GLUPTA_CREDENTIAL_GENERATION:?set GLUPTA_CREDENTIAL_GENERATION}
       GLUPTA_HOST: 0.0.0.0
       GLUPTA_PORT: 8080
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
     tmpfs:
-      - "/run/codex:rw,noexec,nosuid,nodev,size=67108864,uid=${GLUPTA_UID:-501},gid=${GLUPTA_GID:-20},mode=0700"
+      - "/tmp:rw,noexec,nosuid,nodev,size=67108864,uid=${GLUPTA_UID},gid=${GLUPTA_GID},mode=0700"
     volumes:
       - ${GLUPTA_INPUT_DIR:-./inputs}:/data/inputs:ro
       - ${GLUPTA_RUNTIME_DIR:-./runtime}/intake-token:/run/private/intake-token:ro
       - ${GLUPTA_RUNTIME_DIR:-./runtime}/postgres-password:/run/private/postgres-password:ro
       - type: bind
-        source: ${GLUPTA_SECONDARY_CODEX_AUTH_FILE:?set GLUPTA_SECONDARY_CODEX_AUTH_FILE}
-        target: /run/codex/auth.json
-        read_only: false
+        source: ${GLUPTA_RELEASE_PROFILE_FILE:?set GLUPTA_RELEASE_PROFILE_FILE}
+        target: /run/private/release-profile.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GLUPTA_OPENAI_API_KEY_FILE:?set GLUPTA_OPENAI_API_KEY_FILE}
+        target: /run/private/openai-api-key
+        read_only: true
         bind:
           create_host_path: false
     ports:
@@ -46,8 +60,12 @@ services:
       - private
 
   postgres:
-    image: postgres:17.6-bookworm
+    image: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
     restart: unless-stopped
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_DB: glupta
       POSTGRES_USER: glupta

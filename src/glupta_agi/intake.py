@@ -10,6 +10,8 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
+from .contracts import DISCLOSURE_NOTICE_DIGEST
+
 MAX_FILES = 20
 MAX_TOTAL_BYTES = 256 * 1024
 ALLOWED_SUFFIXES = {".md", ".txt"}
@@ -34,12 +36,18 @@ class SourceDocument:
 @dataclass(frozen=True)
 class CanonicalRequest:
     question: str
+    disclosure_profile: str
+    disclosure_notice_digest: str
+    external_disclosure_ack: bool
     sources: tuple[SourceDocument, ...]
     request_digest: str
 
     def workflow_payload(self) -> dict[str, object]:
         return {
             "question": self.question,
+            "disclosure_profile": self.disclosure_profile,
+            "disclosure_notice_digest": self.disclosure_notice_digest,
+            "external_disclosure_ack": self.external_disclosure_ack,
             "sources": [asdict(source) for source in self.sources],
             "request_digest": self.request_digest,
         }
@@ -47,9 +55,13 @@ class CanonicalRequest:
     def matches_recorded_payload(self, recorded: object) -> bool:
         if not isinstance(recorded, dict):
             return False
-        return recorded.get("question") == self.question and recorded.get("sources") == [
-            asdict(source) for source in self.sources
-        ]
+        return (
+            recorded.get("question") == self.question
+            and recorded.get("disclosure_profile") == self.disclosure_profile
+            and recorded.get("disclosure_notice_digest") == self.disclosure_notice_digest
+            and recorded.get("external_disclosure_ack") is self.external_disclosure_ack
+            and recorded.get("sources") == [asdict(source) for source in self.sources]
+        )
 
 
 def _validate_relative_path(raw: str) -> tuple[str, ...]:
@@ -121,7 +133,14 @@ def load_request(
     input_root: Path,
     question: str,
     selected_paths: Iterable[str],
+    disclosure_profile: str = "external_disclosed_v1",
+    disclosure_notice_digest: str = DISCLOSURE_NOTICE_DIGEST,
+    external_disclosure_ack: bool = True,
 ) -> CanonicalRequest:
+    if disclosure_profile != "external_disclosed_v1":
+        raise IntakeError("unsupported disclosure profile")
+    if disclosure_notice_digest != DISCLOSURE_NOTICE_DIGEST or external_disclosure_ack is not True:
+        raise IntakeError("external disclosure acknowledgement is invalid")
     normalized_question = question.strip()
     if not normalized_question:
         raise IntakeError("question must not be empty")
@@ -165,6 +184,9 @@ def load_request(
 
     digest_payload = {
         "question": normalized_question,
+        "disclosure_profile": disclosure_profile,
+        "disclosure_notice_digest": disclosure_notice_digest,
+        "external_disclosure_ack": external_disclosure_ack,
         "sources": [
             {"path": item.path, "sha256": item.sha256, "byte_size": item.byte_size}
             for item in sources
@@ -175,6 +197,9 @@ def load_request(
     ).encode("utf-8")
     return CanonicalRequest(
         question=normalized_question,
+        disclosure_profile=disclosure_profile,
+        disclosure_notice_digest=disclosure_notice_digest,
+        external_disclosure_ack=external_disclosure_ack,
         sources=tuple(sources),
         request_digest=hashlib.sha256(encoded).hexdigest(),
     )

@@ -21,6 +21,7 @@ from glupta_agi.client import (
     main,
     submit,
 )
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST
 
 
 class _Response:
@@ -70,13 +71,21 @@ class ClientTests(unittest.TestCase):
                 files=["one.md", "nested/two.txt"],
                 endpoint="http://127.0.0.1:8765",
                 token_file=token,
+                external_disclosure_ack=True,
                 opener=open_request,
             )
 
             request = seen["request"]
             payload = json.loads(request.data)
             self.assertEqual(
-                payload, {"question": "What changed?", "files": ["one.md", "nested/two.txt"]}
+                payload,
+                {
+                    "question": "What changed?",
+                    "files": ["one.md", "nested/two.txt"],
+                    "disclosure_profile": "external_disclosed_v1",
+                    "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+                    "external_disclosure_ack": True,
+                },
             )
             self.assertEqual(request.full_url, "http://127.0.0.1:8765/v1/evidence-brief")
             self.assertEqual(request.get_header("Authorization"), "Bearer secret-" + "x" * 40)
@@ -86,17 +95,46 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(seen["timeout"], 330)
             self.assertEqual(result["markdown"], "# Evidence brief\n")
 
+    def test_external_disclosure_must_be_explicit_before_capability_read_or_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            token = self._token(Path(temporary))
+            with (
+                patch("glupta_agi.client._read_capability") as capability,
+                self.assertRaisesRegex(ClientError, "acknowledgement"),
+            ):
+                submit(
+                    "q",
+                    ["one.md"],
+                    "http://127.0.0.1:8765",
+                    token,
+                    opener=lambda *_a, **_k: self.fail("network dispatch"),
+                )
+            capability.assert_not_called()
+
     def test_main_prints_markdown_or_json_without_capability(self) -> None:
         result = {"markdown": "# Brief\n", "workflow_id": "id"}
         with patch("glupta_agi.client.submit", return_value=result):
             output = io.StringIO()
             with redirect_stdout(output):
-                self.assertEqual(main(["--question", "q", "facts.md"]), 0)
+                self.assertEqual(
+                    main(["--question", "q", "--ack-external-disclosure", "facts.md"]), 0
+                )
             self.assertEqual(output.getvalue(), "# Brief\n")
 
             output = io.StringIO()
             with redirect_stdout(output):
-                self.assertEqual(main(["--question", "q", "--json", "facts.md"]), 0)
+                self.assertEqual(
+                    main(
+                        [
+                            "--question",
+                            "q",
+                            "--ack-external-disclosure",
+                            "--json",
+                            "facts.md",
+                        ]
+                    ),
+                    0,
+                )
             self.assertEqual(json.loads(output.getvalue()), result)
 
     def test_capability_metadata_and_file_fail_closed(self) -> None:
@@ -134,6 +172,7 @@ class ClientTests(unittest.TestCase):
                             ["one.md"],
                             "http://127.0.0.1:8765",
                             invalid_path,
+                            external_disclosure_ack=True,
                             opener=lambda *_a, **_k: self.fail("network dispatch"),
                         )
 
@@ -165,6 +204,7 @@ class ClientTests(unittest.TestCase):
                             "http://127.0.0.1:8765",
                             token,
                             key,
+                            external_disclosure_ack=True,
                             opener=lambda *_a, **_k: self.fail("network dispatch"),
                         )
 
@@ -181,7 +221,14 @@ class ClientTests(unittest.TestCase):
                 raise urllib.error.HTTPError("url", 503, secret, {}, None)
 
             with self.assertRaises(ClientError) as caught:
-                submit("q", ["one.md"], "http://127.0.0.1:8765", token, opener=http_error)
+                submit(
+                    "q",
+                    ["one.md"],
+                    "http://127.0.0.1:8765",
+                    token,
+                    external_disclosure_ack=True,
+                    opener=http_error,
+                )
             self.assertNotIn(secret, str(caught.exception))
 
             with self.assertRaises(ClientError):
@@ -190,6 +237,7 @@ class ClientTests(unittest.TestCase):
                     ["one.md"],
                     "http://127.0.0.1:8765",
                     token,
+                    external_disclosure_ack=True,
                     opener=lambda *_a, **_k: _Response(b"x" * (2 * 1024 * 1024 + 1)),
                 )
 
@@ -199,6 +247,7 @@ class ClientTests(unittest.TestCase):
                     ["one.md"],
                     "http://127.0.0.1:8765",
                     token,
+                    external_disclosure_ack=True,
                     opener=lambda *_a, **_k: _Response(b"not-json"),
                 )
 
@@ -208,6 +257,7 @@ class ClientTests(unittest.TestCase):
                     ["one.md"],
                     "http://127.0.0.1:8765",
                     token,
+                    external_disclosure_ack=True,
                     opener=lambda *_a, **_k: _Response(b'{"markdown":"incomplete"}'),
                 )
 
@@ -216,5 +266,7 @@ class ClientTests(unittest.TestCase):
         with patch("glupta_agi.client.submit", side_effect=error):
             output = io.StringIO()
             with redirect_stderr(output):
-                self.assertEqual(main(["--question", "q", "facts.md"]), 2)
+                self.assertEqual(
+                    main(["--question", "q", "--ack-external-disclosure", "facts.md"]), 2
+                )
             self.assertEqual(output.getvalue(), "error: server returned HTTP 503\n")
