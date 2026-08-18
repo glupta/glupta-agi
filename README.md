@@ -85,3 +85,19 @@ curl --fail http://127.0.0.1:8765/healthz
 
 Submit only explicitly selected `.md` or `.txt` files from `inputs/`. The
 bearer capability is required for `/v1/evidence-brief` and is never committed.
+
+Use the local client so the bearer capability stays out of shell arguments and
+environment variables. Paths are relative to `inputs/`; the default output is
+the grounded Markdown brief, while `--json` returns the complete typed result:
+
+```sh
+uv run glupta-crawl-submit \
+  --question "What changed, what is uncertain, and what should we decide next?" \
+  notes.md evidence/current.txt
+```
+
+The client accepts only the loopback Crawl endpoint, validates the private
+`runtime/intake-token` file, creates a UUIDv7 idempotency key, performs no
+retry, and never prints the capability. Pass `--idempotency-key` to replay an
+exact prior request or `--token-file` when the private runtime directory is
+elsewhere.
