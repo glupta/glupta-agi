@@ -8,13 +8,14 @@ from datetime import UTC, datetime
 from dbos import DBOS, SetWorkflowID
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
+from . import __version__
 from .contracts import EvidenceBriefRequest, EvidenceBriefResponse
 from .effects import AmbiguousEffectError
 from .intake import IntakeError, load_request
 from .settings import Settings, get_settings
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.3.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version=__version__, docs_url=None, redoc_url=None)
 
 
 def _bearer(authorization: str | None, settings: Settings) -> None:

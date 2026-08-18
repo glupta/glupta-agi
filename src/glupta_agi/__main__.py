@@ -7,6 +7,7 @@ import os
 import uvicorn
 from dbos import DBOS, DBOSConfig
 
+from . import __version__
 from .settings import get_settings
 
 
@@ -14,7 +15,7 @@ def main() -> None:
     settings = get_settings()
     config: DBOSConfig = {
         "name": "glupta-agi-crawl",
-        "application_version": "0.3.0",
+        "application_version": __version__,
         "system_database_url": settings.dbos_system_database_url(),
     }
     DBOS(config=config)

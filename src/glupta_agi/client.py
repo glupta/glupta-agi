@@ -150,7 +150,7 @@ def submit(
         method="POST",
     )
     try:
-        with (opener or urllib.request.build_opener(_NoRedirect()).open)(
+        with (opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect()).open)(  # noqa: E501
             request, timeout=REQUEST_TIMEOUT_SECONDS
         ) as response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
@@ -164,6 +164,8 @@ def submit(
         result = EvidenceBriefResponse.model_validate_json(body)
     except ValueError as exc:
         raise ClientError("server returned an invalid evidence brief") from exc
+    if result.workflow_id != workflow_id:
+        raise ClientError("server returned a mismatched workflow result")
     return result.model_dump(mode="json")
 
 

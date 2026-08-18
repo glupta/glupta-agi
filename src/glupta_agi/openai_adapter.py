@@ -13,16 +13,8 @@ from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 
-from .contracts import EvidenceBrief
-from .inference import (
-    FrozenDispatch,
-    ProviderAudit,
-    ProviderResult,
-    ReleaseProfile,
-    canonical_digest,
-    provider_record_digest,
-    usd_upper_bound,
-)
+from . import contracts
+from .inference import FrozenDispatch, ReleaseProfile, usd_upper_bound
 
 _USAGE_FIELDS = set("input_tokens input_tokens_details output_tokens output_tokens_details total_tokens".split())  # noqa: E501
 _INPUT_DETAIL_FIELDS = set("cached_tokens cache_write_tokens".split())
@@ -34,11 +26,13 @@ class AdapterError(RuntimeError):
 
 
 class ProviderAmbiguousError(AdapterError):
-    pass
+    def __init__(self, message: str, audit: contracts.ProviderAudit | None = None) -> None:
+        super().__init__(message)
+        self.audit = audit
 
 
 class ProviderRejectedError(AdapterError):
-    def __init__(self, message: str, audit: ProviderAudit | None = None) -> None:
+    def __init__(self, message: str, audit: contracts.ProviderAudit | None = None) -> None:
         super().__init__(message)
         self.audit = audit
 
@@ -87,12 +81,12 @@ class OpenAIResponsesAdapter:
         self.credential_file = credential_file
         self.client_factory = client_factory
 
-    async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> ProviderResult:  # noqa: E501
+    async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> contracts.ProviderResult:  # noqa: E501
         if not self.profile.current_at():
             raise AdapterError("release profile evidence is expired")
         if dispatch.release_profile_digest != self.profile.digest():
             raise AdapterError("release profile changed after effect reservation")
-        if dispatch.request_body_digest != canonical_digest(request_body):
+        if dispatch.request_body_digest != contracts.canonical_digest(request_body):
             raise AdapterError("provider request changed after effect reservation")
         key = _read_api_key(self.credential_file)
         client_request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, dispatch.digest()))
@@ -101,6 +95,7 @@ class OpenAIResponsesAdapter:
         if remaining_seconds <= 0:
             raise AdapterError("model request exceeded the wall deadline")
         client = None
+        cleanup_ambiguous = False
         loop = asyncio.get_running_loop()
         monotonic_deadline = loop.time() + remaining_seconds
         try:
@@ -113,6 +108,7 @@ class OpenAIResponsesAdapter:
             async with asyncio.timeout_at(monotonic_deadline):
                 headers = {"X-Client-Request-Id": client_request_id}
                 response = await client.responses.create(**request_body, extra_headers=headers)
+                completed = datetime.now(UTC)
         except APIStatusError as exc:
             del exc
             raise ProviderRejectedError("OpenAI request was rejected") from None
@@ -125,9 +121,8 @@ class OpenAIResponsesAdapter:
                     try:
                         async with asyncio.timeout_at(monotonic_deadline):
                             await close()
-                    except Exception:  # noqa: S110 -- cleanup cannot change request outcome
-                        pass
-        completed = datetime.now(UTC)
+                    except Exception:
+                        cleanup_ambiguous = True
         status = str(getattr(response, "status", ""))
         request_id = str(getattr(response, "_request_id", "") or "")
         response_id = str(getattr(response, "id", "") or "")
@@ -167,25 +162,22 @@ class OpenAIResponsesAdapter:
         if any(value > limit for value, limit in zip(observed, limits, strict=True)):
             raise ProviderAmbiguousError("OpenAI usage exceeds the reserved budget")
         output_text = str(getattr(response, "output_text", "") or "")
-        audit = ProviderAudit(
-            client_request_id=client_request_id,
-            provider_request_id=request_id,
-            response_id=response_id,
-            requested_model=dispatch.model,
-            returned_model=returned_model,
-            status=status,
-            input_tokens=input_tokens,
-            cached_input_tokens=cached_tokens,
+        audit = contracts.ProviderAudit(
+            workflow_id=dispatch.workflow_id, request_digest=dispatch.request_digest,
+            release_profile_digest=dispatch.release_profile_digest,
+            client_request_id=client_request_id, provider_request_id=request_id,
+            response_id=response_id, requested_model=dispatch.model,
+            returned_model=returned_model, status=status, input_tokens=input_tokens,
+            cached_input_tokens=cached_tokens, output_tokens=output_tokens,
             cache_write_input_tokens=cache_write_tokens,
-            output_tokens=output_tokens,
-            reasoning_tokens=reasoning_tokens,
-            total_tokens=total_tokens,
+            reasoning_tokens=reasoning_tokens, total_tokens=total_tokens,
             cost_upper_bound_micros=cost,
             request_body_digest=dispatch.request_body_digest,
-            output_digest=canonical_digest(output_text),
-            started_at=started,
+            output_digest=contracts.canonical_digest(output_text), started_at=started,
             completed_at=completed,
         )
+        if cleanup_ambiguous:
+            raise ProviderAmbiguousError("OpenAI response cleanup is ambiguous", audit)
         if returned_model != dispatch.model:
             raise ProviderRejectedError("OpenAI returned an unapproved model", audit)
         if completed > dispatch.wall_deadline:
@@ -193,10 +185,10 @@ class OpenAIResponsesAdapter:
         if status != "completed":
             raise ProviderRejectedError("OpenAI response was not completed", audit)
         try:
-            brief = EvidenceBrief.model_validate_json(output_text)
+            brief = contracts.EvidenceBrief.model_validate_json(output_text)
         except ValueError as exc:
             raise ProviderRejectedError("OpenAI output failed the response schema", audit) from exc
-        result_digest = canonical_digest(brief.model_dump(mode="json"))
+        result_digest = contracts.canonical_digest(brief.model_dump(mode="json"))
         audit = audit.model_copy(update={"validated_result_digest": result_digest})
-        audit = audit.model_copy(update={"record_digest": provider_record_digest(brief, audit)})
-        return ProviderResult(brief=brief, audit=audit)
+        audit = audit.model_copy(update={"record_digest": contracts.provider_record_digest(brief, audit)})  # noqa: E501
+        return contracts.ProviderResult(brief=brief, audit=audit)

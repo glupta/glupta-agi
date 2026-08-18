@@ -5,10 +5,12 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 import urllib.error
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,7 +23,8 @@ from glupta_agi.client import (
     main,
     submit,
 )
-from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief
+from tests.helpers import provider_audit
 
 
 class _Response:
@@ -48,15 +51,20 @@ class ClientTests(unittest.TestCase):
     def test_submit_sends_bounded_request_and_returns_typed_response(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             token = self._token(Path(temporary))
+            workflow_id = "01a01407-fe3e-72aa-9b8f-7666915df735"
+            request_digest = "d" * 64
+            brief = EvidenceBrief(
+                answer="grounded", citations=[], uncertainties=[], next_decisions=[]
+            )
             body = json.dumps(
                 {
-                    "answer": "grounded",
-                    "citations": [],
-                    "uncertainties": [],
-                    "next_decisions": [],
-                    "request_digest": "d" * 64,
-                    "workflow_id": "01a01407-fe3e-72aa-9b8f-7666915df735",
+                    **brief.model_dump(mode="json"),
+                    "request_digest": request_digest,
+                    "workflow_id": workflow_id,
                     "markdown": "# Evidence brief\n",
+                    "provider_audit": provider_audit(
+                        brief, workflow_id=workflow_id, request_digest=request_digest
+                    ).model_dump(mode="json"),
                 }
             ).encode()
             seen = {}
@@ -71,6 +79,7 @@ class ClientTests(unittest.TestCase):
                 files=["one.md", "nested/two.txt"],
                 endpoint="http://127.0.0.1:8765",
                 token_file=token,
+                idempotency_key=workflow_id,
                 external_disclosure_ack=True,
                 opener=open_request,
             )
@@ -90,8 +99,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(request.full_url, "http://127.0.0.1:8765/v1/evidence-brief")
             self.assertEqual(request.get_header("Authorization"), "Bearer secret-" + "x" * 40)
             generated = request.get_header("Idempotency-key")
-            self.assertEqual(uuid.UUID(generated).version, 7)
-            self.assertEqual(str(uuid.UUID(generated)), generated)
+            self.assertEqual(generated, workflow_id)
             self.assertEqual(seen["timeout"], 330)
             self.assertEqual(result["markdown"], "# Evidence brief\n")
 
@@ -110,6 +118,41 @@ class ClientTests(unittest.TestCase):
                     opener=lambda *_a, **_k: self.fail("network dispatch"),
                 )
             capability.assert_not_called()
+
+    def test_response_audit_and_requested_workflow_are_cross_bound(self) -> None:
+        workflow_id, request_digest = "01a01407-fe3e-72aa-9b8f-7666915df735", "d" * 64
+        brief = EvidenceBrief(answer="grounded", citations=[], uncertainties=[], next_decisions=[])
+        audit = provider_audit(brief, workflow_id=workflow_id, request_digest=request_digest)
+        valid = {
+            **brief.model_dump(mode="json"),
+            "request_digest": request_digest,
+            "workflow_id": workflow_id,
+            "markdown": "# Evidence brief\n",
+            "provider_audit": audit.model_dump(mode="json"),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            token = self._token(Path(temporary))
+            tampered = {**valid, "provider_audit": {**valid["provider_audit"], "response_id": "x"}}
+            with self.assertRaisesRegex(ClientError, "invalid evidence brief"):
+                submit(
+                    "q", ["one.md"], "http://127.0.0.1:8765", token, workflow_id,
+                    external_disclosure_ack=True,
+                    opener=lambda *_a, **_k: _Response(json.dumps(tampered).encode()),
+                )
+            other_id = "01a01407-fe3e-72aa-9b8f-7666915df736"
+            other = {
+                **valid,
+                "workflow_id": other_id,
+                "provider_audit": provider_audit(
+                    brief, workflow_id=other_id, request_digest=request_digest
+                ).model_dump(mode="json"),
+            }
+            with self.assertRaisesRegex(ClientError, "mismatched workflow"):
+                submit(
+                    "q", ["one.md"], "http://127.0.0.1:8765", token, workflow_id,
+                    external_disclosure_ack=True,
+                    opener=lambda *_a, **_k: _Response(json.dumps(other).encode()),
+                )
 
     def test_main_prints_markdown_or_json_without_capability(self) -> None:
         result = {"markdown": "# Brief\n", "workflow_id": "id"}
@@ -211,6 +254,68 @@ class ClientTests(unittest.TestCase):
     def test_redirects_are_not_followed(self) -> None:
         with self.assertRaisesRegex(ClientError, "redirect rejected"):
             _NoRedirect().redirect_request(None, None, 302, "redirect", {}, "url")
+
+    def test_hostile_ambient_proxy_cannot_receive_loopback_bearer(self) -> None:
+        seen = {"target": False, "proxy": False, "proxy_auth": False}
+        workflow_id, request_digest = "01a01407-fe3e-72aa-9b8f-7666915df735", "d" * 64
+        brief = EvidenceBrief(answer="grounded", citations=[], uncertainties=[], next_decisions=[])
+        body = json.dumps(
+            {
+                **brief.model_dump(mode="json"),
+                "request_digest": request_digest,
+                "workflow_id": workflow_id,
+                "markdown": "# Evidence brief\n",
+                "provider_audit": provider_audit(
+                    brief, workflow_id=workflow_id, request_digest=request_digest
+                ).model_dump(mode="json"),
+            }
+        ).encode()
+
+        def handler(label: str) -> type[BaseHTTPRequestHandler]:
+            class Handler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:
+                    seen[label] = True
+                    seen[f"{label}_auth"] = bool(self.headers.get("Authorization"))
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *_args: object) -> None:
+                    pass
+
+            return Handler
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), handler("target"))
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), handler("proxy"))
+        threads = [threading.Thread(target=server.serve_forever) for server in (target, proxy)]
+        for thread in threads:
+            thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary, patch.dict(
+                os.environ,
+                {
+                    "HTTP_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+                    "http_proxy": f"http://127.0.0.1:{proxy.server_port}",
+                    "HTTPS_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+                    "https_proxy": f"http://127.0.0.1:{proxy.server_port}",
+                },
+                clear=True,
+            ):
+                submit(
+                    "q", ["one.md"], f"http://127.0.0.1:{target.server_port}",
+                    self._token(Path(temporary)), workflow_id,
+                    external_disclosure_ack=True,
+                )
+        finally:
+            for server in (target, proxy):
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join()
+        self.assertTrue(seen["target"])
+        self.assertFalse(seen["proxy"])
+        self.assertFalse(seen["proxy_auth"])
 
     def test_transport_failures_are_bounded_and_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
