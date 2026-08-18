@@ -38,8 +38,7 @@ class ProviderRejectedError(AdapterError):
 
 
 def _field_names(value: Any) -> set[str]:
-    dumped = value.model_dump(exclude_none=False) if hasattr(value, "model_dump") else vars(value)
-    return set(dumped)
+    return set(value.model_dump(exclude_none=False) if hasattr(value, "model_dump") else vars(value))  # noqa: E501
 
 
 def _read_api_key(path: Path) -> str:
@@ -94,7 +93,7 @@ class OpenAIResponsesAdapter:
         remaining_seconds = (dispatch.wall_deadline - started).total_seconds()
         if remaining_seconds <= 0:
             raise AdapterError("model request exceeded the wall deadline")
-        client, cleanup_ambiguous, provider_rejected = None, False, False
+        client, cleanup_ambiguous, provider_status = None, False, None
         monotonic_deadline = asyncio.get_running_loop().time() + remaining_seconds
         try:
             http_client = DefaultAsyncHttpxClient(trust_env=False, follow_redirects=False)
@@ -107,8 +106,8 @@ class OpenAIResponsesAdapter:
                 headers = {"X-Client-Request-Id": client_request_id}
                 response = await client.responses.create(**request_body, extra_headers=headers)
                 completed = datetime.now(UTC)
-        except APIStatusError:
-            provider_rejected = True
+        except APIStatusError as exc:
+            provider_status = exc.status_code
         except Exception as exc:
             raise ProviderAmbiguousError("OpenAI request outcome is ambiguous") from exc
         finally:
@@ -120,9 +119,10 @@ class OpenAIResponsesAdapter:
                             await close()
                     except Exception:
                         cleanup_ambiguous = True
-        if provider_rejected:
-            error = ProviderAmbiguousError("OpenAI response cleanup is ambiguous") if cleanup_ambiguous else ProviderRejectedError("OpenAI request was rejected")  # noqa: E501
-            raise error from None
+        if provider_status is not None:
+            if provider_status in {400, 401, 403, 404, 422} and not cleanup_ambiguous:
+                raise ProviderRejectedError("OpenAI request was rejected") from None
+            raise ProviderAmbiguousError("OpenAI request outcome is ambiguous") from None
         status = str(getattr(response, "status", ""))
         request_id = str(getattr(response, "_request_id", "") or "")
         response_id = str(getattr(response, "id", "") or "")

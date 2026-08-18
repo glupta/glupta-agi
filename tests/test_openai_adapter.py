@@ -186,8 +186,8 @@ def test_model_or_schema_rejection_is_definitive_and_audited() -> None:
             TestCase().assertIsNotNone(caught.value.audit)
 
 
-@pytest.mark.parametrize("status", [400, 429, 500])
-def test_authenticated_status_error_is_definitive_and_sanitized(status: int) -> None:
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_explicit_terminal_status_error_is_definitive_and_sanitized(status: int) -> None:
     body = _body()
     request = Request("POST", "https://api.openai.com/v1/responses")
     response = Response(status, request=request, headers={"x-request-id": "req_rejected"})
@@ -202,6 +202,30 @@ def test_authenticated_status_error_is_definitive_and_sanitized(status: int) -> 
             _generate(adapter, body)
     case = TestCase()
     case.assertEqual(str(caught.value), "OpenAI request was rejected")
+    case.assertIsNone(caught.value.audit)
+    case.assertIsNone(caught.value.__cause__)
+    case.assertNotIn("RAW_PROVIDER_BODY", "".join(traceback.format_exception(caught.value)))
+    case.assertTrue(client.closed)
+
+
+@pytest.mark.parametrize("status", [408, 409, 418, 429, 500, 503])
+def test_retryable_or_unclassified_status_error_is_ambiguous_and_sanitized(
+    status: int,
+) -> None:
+    body = _body()
+    request = Request("POST", "https://api.openai.com/v1/responses")
+    response = Response(status, request=request, headers={"x-request-id": "req_unknown"})
+    error = APIStatusError("RAW_PROVIDER_BODY", response=response, body={"secret": "marker"})
+    client = FakeClient(error)
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, client_factory=lambda **_kwargs: client
+        )
+        with pytest.raises(ProviderAmbiguousError) as caught:
+            _generate(adapter, body)
+    case = TestCase()
+    case.assertEqual(str(caught.value), "OpenAI request outcome is ambiguous")
     case.assertIsNone(caught.value.audit)
     case.assertIsNone(caught.value.__cause__)
     case.assertNotIn("RAW_PROVIDER_BODY", "".join(traceback.format_exception(caught.value)))

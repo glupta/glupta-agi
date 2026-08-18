@@ -128,12 +128,59 @@ def test_lost_failed_ack_without_exact_readback_becomes_sticky_unknown(readback:
     case.assertEqual(replayed.state, "unknown")
 
 
-def test_authenticated_rejection_with_cleanup_expiry_is_sticky_unknown() -> None:
+@pytest.mark.parametrize("status", [408, 409, 429, 500, 503])
+def test_retryable_status_is_sticky_unknown_and_replay_never_redispatches(status: int) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
+        packet = _packet(credential_file=str(key))
+        request = Request("POST", "https://api.openai.com/v1/responses")
+        response = Response(status, request=request, headers={"x-request-id": "req_unknown"})
+        rejection = APIStatusError(
+            "RAW_PROVIDER_BODY", response=response, body={"secret": "marker"}
+        )
+
+        class RejectingClient:
+            def __init__(self) -> None:
+                self.responses = self
+                self.create_calls = 0
+
+            async def create(self, **_kwargs: object) -> None:
+                self.create_calls += 1
+                raise rejection
+
+            async def close(self) -> None:
+                pass
+
+        client = RejectingClient()
+
+        def adapter_factory(profile: object, credential_file: Path):
+            return OpenAIResponsesAdapter(
+                profile,
+                credential_file,
+                client_factory=lambda **_kwargs: client,
+            )
+
+        with pytest.raises(AmbiguousEffectError):
+            asyncio.run(workflow._run_inference(packet, adapter_factory=adapter_factory))
+
+    dispatch = workflow._dispatch(
+        packet, workflow._request_body(packet.prompt, packet.release_profile)
+    )
+    recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+    case = TestCase()
+    case.assertEqual(recorded.state, "unknown")
+    case.assertEqual(recorded.hold_reason, "provider_outcome_ambiguous")
+    case.assertEqual(client.create_calls, 1)
+    _assert_replay_does_not_dispatch(packet, AmbiguousEffectError)
+    case.assertEqual(client.create_calls, 1)
+
+
+def test_terminal_rejection_with_cleanup_expiry_is_sticky_unknown() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
         packet = _packet(credential_file=str(key), near_deadline=True)
         request = Request("POST", "https://api.openai.com/v1/responses")
-        response = Response(429, request=request, headers={"x-request-id": "req_rejected"})
+        response = Response(400, request=request, headers={"x-request-id": "req_rejected"})
         rejection = APIStatusError(
             "RAW_PROVIDER_BODY", response=response, body={"secret": "marker"}
         )
