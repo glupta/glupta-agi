@@ -1,25 +1,13 @@
-"""One durable evidence workflow backed by the secondary Codex subscription."""
+"""One durable, provider-fenced Crawl evidence workflow."""
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import tempfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from codex_cli_bin import bundled_codex_path, bundled_path_dir
 from dbos import DBOS, Queue
-from openai_codex import (
-    ApprovalMode,
-    Codex,
-    CodexConfig,
-    CodexError,
-    CodexRpcError,
-    Sandbox,
-    TransportClosedError,
-)
-from openai_codex.generated.v2_all import ReasoningEffort, WebSearchMode
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
@@ -30,247 +18,199 @@ from pydantic_ai.usage import RequestUsage
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
 from .contracts import EvidenceBrief
 from .effects import AmbiguousEffectError, hold_unknown, reserve, transition
+from .inference import (
+    FrozenDispatch,
+    ProviderAudit,
+    ReleaseProfile,
+    canonical_digest,
+    usd_upper_bound,
+)
+from .openai_adapter import (
+    AdapterError,
+    OpenAIResponsesAdapter,
+    ProviderAmbiguousError,
+    ProviderRejectedError,
+)
 
-_GLOBAL_DISABLED_FEATURES = ("apps", "plugins", "remote_plugin")
+_REQUEST_OVERHEAD_BYTES = 4096
 
 
 class BriefGenerationError(RuntimeError):
-    """Codex did not produce a valid source-grounded brief."""
+    pass
 
 
 class _CrawlModelPacket(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
     prompt: str
     sources: list[dict[str, Any]]
-    codex_home: str
-    model_name: str
+    release_profile: ReleaseProfile
+    credential_file: str
+    admitted_at: datetime
     workflow_id: str
     request_digest: str
 
 
-def _codex_launch_args(environment: dict[str, str], sqlite_home: str) -> tuple[str, ...]:
-    env_binary = shutil.which("env", path=os.defpath)
-    if env_binary is None:
-        raise BriefGenerationError("clean Codex environment launcher is unavailable")
-    assignments = tuple(f"{key}={value}" for key, value in sorted(environment.items()))
-    disabled_features = tuple(
-        argument for feature in _GLOBAL_DISABLED_FEATURES for argument in ("--disable", feature)
-    )
-    return (
-        env_binary,
-        "-i",
-        *assignments,
-        str(bundled_codex_path()),
-        "-c",
-        'cli_auth_credentials_store="file"',
-        "-c",
-        'history.persistence="none"',
-        "-c",
-        f"sqlite_home={json.dumps(sqlite_home)}",
-        "app-server",
-        *disabled_features,
-        "--listen",
-        "stdio://",
-    )
+def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
+    return {
+        "model": profile.model,
+        "instructions": SYSTEM_PROMPT,
+        "input": prompt,
+        "reasoning": {"effort": "medium"},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "crawl_evidence_brief",
+                "schema": EvidenceBrief.model_json_schema(),
+                "strict": True,
+            }
+        },
+        "max_output_tokens": profile.max_output_tokens,
+        "store": False,
+        "background": False,
+        "stream": False,
+        "tools": [],
+        "tool_choice": "none",
+        "truncation": "disabled",
+    }
 
 
-def _provider_error_token(error: BaseException) -> str:
-    """Return a bounded token without persisting provider error details."""
-    if isinstance(error, TransportClosedError):
-        return "provider_transport_closed"
-    if isinstance(error, CodexRpcError):
-        return "provider_rpc_error"
-    if isinstance(error, CodexError):
-        return "provider_sdk_error"
-    if isinstance(error, TimeoutError):
-        return "provider_timeout"
-    if isinstance(error, OSError):
-        return "provider_os_error"
-    return "provider_error"
-
-
-def _request_usage(usage: Any) -> RequestUsage:
-    if usage is None:
-        return RequestUsage(details={"sdk_usage_unavailable": 1})
-    last = usage.last
-    return RequestUsage(
-        input_tokens=last.input_tokens,
-        cache_read_tokens=last.cached_input_tokens,
-        output_tokens=last.output_tokens,
-        details={"reasoning_output_tokens": last.reasoning_output_tokens},
-    )
-
-
-def _run_codex(
-    prompt: str,
-    sources: list[dict[str, Any]],
-    codex_home: str,
-    model_name: str,
-    workflow_id: str,
-    request_digest: str,
-    *,
-    codex_factory: Any = Codex,
-) -> tuple[EvidenceBrief, RequestUsage]:
-    effect = reserve(workflow_id, request_digest, model_name)
-
-    def validate(raw: str | dict[str, Any]) -> EvidenceBrief:
-        brief = (
-            EvidenceBrief.model_validate_json(raw)
-            if isinstance(raw, str)
-            else EvidenceBrief.model_validate(raw)
+def _dispatch(packet: _CrawlModelPacket, request_body: dict[str, Any]) -> FrozenDispatch:
+    now = datetime.now(UTC)
+    if not packet.release_profile.current_at(now):
+        raise BriefGenerationError("release profile evidence is expired")
+    if packet.admitted_at.tzinfo is None or packet.admitted_at > now + timedelta(seconds=5):
+        raise BriefGenerationError("admission timestamp is invalid")
+    input_bound = (
+        len(
+            json.dumps(
+                request_body, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode()
         )
-        return resolve_citations(brief, sources)
+        + _REQUEST_OVERHEAD_BYTES
+    )
+    if input_bound > packet.release_profile.max_input_tokens:
+        raise BriefGenerationError("model request exceeds the input-token ceiling")
+    if usd_upper_bound(input_bound, packet.release_profile.max_output_tokens) > (
+        packet.release_profile.max_usd_micros
+    ):
+        raise BriefGenerationError("model request exceeds the USD ceiling")
+    queue_deadline = packet.admitted_at.astimezone(UTC) + timedelta(
+        seconds=packet.release_profile.queue_timeout_seconds
+    )
+    return FrozenDispatch(
+        workflow_id=packet.workflow_id,
+        request_digest=packet.request_digest,
+        request_body_digest=canonical_digest(request_body),
+        release_profile_digest=packet.release_profile.digest(),
+        model=packet.release_profile.model,
+        input_token_upper_bound=input_bound,
+        max_output_tokens=packet.release_profile.max_output_tokens,
+        max_usd_micros=packet.release_profile.max_usd_micros,
+        queue_deadline=queue_deadline,
+        wall_deadline=packet.admitted_at.astimezone(UTC)
+        + timedelta(seconds=packet.release_profile.wall_timeout_seconds),
+        wall_timeout_seconds=packet.release_profile.wall_timeout_seconds,
+    )
 
-    if effect.state in {"returned", "reconciled"}:
-        if effect.result is None:
-            raise BriefGenerationError("recorded model effect has no result")
-        recorded_output_invalid = False
+
+def _usage(audit: ProviderAudit) -> RequestUsage:
+    return RequestUsage(
+        input_tokens=audit.input_tokens,
+        cache_write_tokens=audit.cache_write_input_tokens,
+        cache_read_tokens=audit.cached_input_tokens,
+        output_tokens=audit.output_tokens,
+        details={
+            "reasoning_output_tokens": audit.reasoning_tokens,
+            "cost_upper_bound_micros": audit.cost_upper_bound_micros,
+        },
+    )
+
+
+def _run_inference(
+    packet: _CrawlModelPacket,
+    *,
+    adapter_factory: Any = OpenAIResponsesAdapter,
+) -> tuple[EvidenceBrief, RequestUsage]:
+    request_body = _request_body(packet.prompt, packet.release_profile)
+    dispatch = _dispatch(packet, request_body)
+    effect = reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+
+    def recorded() -> tuple[EvidenceBrief, RequestUsage]:
+        if effect.result is None or effect.audit is None:
+            raise BriefGenerationError("recorded model effect lacks result or usage audit")
         try:
-            brief = validate(effect.result)
+            brief = resolve_citations(EvidenceBrief.model_validate(effect.result), packet.sources)
+            audit = ProviderAudit.model_validate(effect.audit)
         except ValueError:
-            recorded_output_invalid = True
-        if recorded_output_invalid:
             raise BriefGenerationError("recorded model effect failed validation") from None
         if effect.state == "returned":
-            transition(workflow_id, "returned", "reconciled")
-        return brief, _request_usage(None)
+            transition(packet.workflow_id, "returned", "reconciled")
+        return brief, _usage(audit)
+
+    if effect.state in {"returned", "reconciled"}:
+        return recorded()
     if effect.state == "failed":
-        raise BriefGenerationError("recorded model effect failed validation")
-    if effect.state in {"dispatching", "thread_started", "unknown"}:
+        raise BriefGenerationError("recorded model effect failed")
+    if effect.state in {"dispatching", "unknown"}:
         hold_unknown(effect, f"recovery_from_{effect.state}")
+    if datetime.now(UTC) > dispatch.queue_deadline:
+        transition(packet.workflow_id, "reserved", "failed", hold_reason="queue_deadline_expired")
+        raise BriefGenerationError("model request exceeded the queue deadline")
 
-    with (
-        tempfile.TemporaryDirectory(prefix="glupta-crawl-") as temporary,
-        tempfile.TemporaryDirectory(prefix="glupta-crawl-state-", dir=codex_home) as state_home,
-    ):
-        bundled_tools = bundled_path_dir()
-        search_path = os.defpath
-        if bundled_tools is not None:
-            search_path = os.pathsep.join((str(bundled_tools), search_path))
-        environment = {
-            "CODEX_HOME": codex_home,
-            "HOME": os.path.dirname(codex_home),
-            "LANG": "C.UTF-8",
-            "PATH": search_path,
-            "TMPDIR": tempfile.gettempdir(),
-            "STUDIO_CODEX_SESSION_ORIGIN": "glupta-crawl-v1",
-        }
-        launch_args = _codex_launch_args(environment, state_home)
-        client = None
-        invalid_output = False
-        provider_failure: str | None = None
+    adapter = adapter_factory(packet.release_profile, Path(packet.credential_file))
+    effect = transition(packet.workflow_id, "reserved", "dispatching")
+    try:
+        provider_result = adapter.generate(dispatch, request_body)
+    except ProviderRejectedError as exc:
+        transition(
+            packet.workflow_id,
+            "dispatching",
+            "failed",
+            audit=None if exc.audit is None else exc.audit.model_dump(mode="json"),
+            hold_reason="provider_rejected",
+        )
+        raise BriefGenerationError("provider response was rejected") from None
+    except (ProviderAmbiguousError, AdapterError):
         try:
-            effect = transition(workflow_id, "reserved", "dispatching")
-            client = codex_factory(
-                CodexConfig(
-                    cwd=temporary,
-                    launch_args_override=launch_args,
-                )
-            )
-            thread = client.thread_start(
-                approval_mode=ApprovalMode.deny_all,
-                base_instructions=SYSTEM_PROMPT,
-                config={
-                    "features": {
-                        "apps": False,
-                        "multi_agent": False,
-                        "plugins": False,
-                        "remote_plugin": False,
-                        "shell_tool": False,
-                        "skill_search": False,
-                    },
-                    "model_provider": "crawl_openai",
-                    "model_providers": {
-                        "crawl_openai": {
-                            "name": "OpenAI",
-                            "request_max_retries": 0,
-                            "requires_openai_auth": True,
-                            "stream_max_retries": 0,
-                            "wire_api": "responses",
-                        }
-                    },
-                    "tools": {"view_image": False},
-                    "web_search": WebSearchMode.disabled.value,
-                },
-                cwd=temporary,
-                ephemeral=True,
-                model=model_name,
-                sandbox=Sandbox.read_only,
-            )
-            effect = transition(workflow_id, "dispatching", "thread_started", thread_id=thread.id)
-            turn = thread.turn(
-                prompt,
-                approval_mode=ApprovalMode.deny_all,
-                cwd=temporary,
-                effort=ReasoningEffort.medium,
-                model=model_name,
-                output_schema=EvidenceBrief.model_json_schema(),
-                sandbox=Sandbox.read_only,
-            )
-            effect = transition(workflow_id, "thread_started", "turn_started", turn_id=turn.id)
-            result = turn.run()
-            if str(getattr(result.status, "value", result.status)) != "completed":
-                hold_unknown(effect, "bound_turn_not_completed")
-            raw = result.final_response
-            if not raw:
-                hold_unknown(effect, "bound_turn_has_no_response")
-            try:
-                brief = validate(raw)
-            except ValueError:
-                invalid_output = True
-            else:
-                effect = transition(
-                    workflow_id,
-                    "turn_started",
-                    "returned",
-                    result=brief.model_dump(mode="json"),
-                )
-                transition(workflow_id, "returned", "reconciled")
-                return brief, _request_usage(getattr(result, "usage", None))
-        except AmbiguousEffectError:
-            raise
-        except Exception as error:
-            provider_failure = _provider_error_token(error)
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:  # noqa: S110 -- never persist raw provider cleanup errors
-                    pass
-
-        if invalid_output:
-            if effect.state == "turn_started":
-                transition(workflow_id, "turn_started", "failed", hold_reason="invalid_output")
-            raise BriefGenerationError("Codex did not produce a valid grounded brief") from None
-        if provider_failure is not None:
-            if effect.state in {"dispatching", "thread_started", "turn_started"}:
-                hold_unknown(effect, f"{provider_failure}_after_{effect.state}")
-            raise BriefGenerationError("Codex provider request failed") from None
-        raise BriefGenerationError("Codex provider request failed") from None
+            hold_unknown(effect, "provider_outcome_ambiguous")
+        except AmbiguousEffectError as exc:
+            raise exc from None
+    try:
+        brief = resolve_citations(provider_result.brief, packet.sources)
+    except ValueError:
+        transition(
+            packet.workflow_id,
+            "dispatching",
+            "failed",
+            audit=provider_result.audit.model_dump(mode="json"),
+            hold_reason="invalid_citation",
+        )
+        raise BriefGenerationError("provider output failed citation validation") from None
+    effect = transition(
+        packet.workflow_id,
+        "dispatching",
+        "returned",
+        result=brief.model_dump(mode="json"),
+        audit=provider_result.audit.model_dump(mode="json"),
+    )
+    transition(packet.workflow_id, "returned", "reconciled")
+    return brief, _usage(provider_result.audit)
 
 
 def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     del info
-    raw_packet = None
-    for message in reversed(messages):
-        for part in reversed(message.parts):
-            if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                raw_packet = part.content
-                break
-        if raw_packet is not None:
-            break
+    raw_packet = next(
+        (
+            part.content
+            for message in reversed(messages)
+            for part in reversed(message.parts)
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str)
+        ),
+        None,
+    )
     if raw_packet is None:
         raise BriefGenerationError("Crawl model packet is missing")
-    packet = _CrawlModelPacket.model_validate_json(raw_packet)
-    brief, usage = _run_codex(
-        packet.prompt,
-        packet.sources,
-        packet.codex_home,
-        packet.model_name,
-        packet.workflow_id,
-        packet.request_digest,
-    )
+    brief, usage = _run_inference(_CrawlModelPacket.model_validate_json(raw_packet))
     return ModelResponse(parts=[TextPart(brief.model_dump_json())], usage=usage)
 
 
@@ -280,43 +220,37 @@ _crawl_durability = DBOSDurability(
     parallel_execution_mode="sequential",
     register_legacy_workflows=False,
 )
-
 _crawl_agent = Agent(
-    FunctionModel(_crawl_model, model_name="codex-subscription-adapter"),
+    FunctionModel(_crawl_model, model_name="openai-responses-adapter"),
     name="crawl_observe_agent",
     output_type=EvidenceBrief,
     retries=0,
     capabilities=[_crawl_durability],
 )
-
-crawl_observe_queue = Queue(
-    "crawl-observe-v1",
-    concurrency=1,
-    worker_concurrency=1,
-)
+crawl_observe_queue = Queue("crawl-observe-v1", concurrency=1, worker_concurrency=1)
 
 
 @DBOS.workflow()
 async def evidence_brief_workflow(
     payload: dict[str, Any],
     workflow_id: str,
-    codex_home: str,
-    model_name: str,
+    release_profile: dict[str, Any],
+    credential_file: str,
+    admitted_at: str,
 ) -> dict[str, Any]:
     packet = _CrawlModelPacket(
         prompt=build_user_prompt(str(payload["question"]), payload["sources"]),
         sources=payload["sources"],
-        codex_home=codex_home,
-        model_name=model_name,
+        release_profile=ReleaseProfile.model_validate(release_profile),
+        credential_file=credential_file,
+        admitted_at=admitted_at,
         workflow_id=workflow_id,
         request_digest=str(payload["request_digest"]),
     )
     brief = (await _crawl_agent.run(packet.model_dump_json(), retries=0)).output
-    markdown = render_markdown(brief)
-    response = {
+    return {
         **brief.model_dump(mode="json"),
         "request_digest": payload["request_digest"],
         "workflow_id": workflow_id,
-        "markdown": markdown,
+        "markdown": render_markdown(brief),
     }
-    return response

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from glupta_agi.api import evidence_brief
-from glupta_agi.contracts import EvidenceBriefRequest
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefRequest
 from glupta_agi.intake import load_request
 from glupta_agi.settings import Settings
 from glupta_agi.workflow import evidence_brief_workflow
+from tests.helpers import private_file, release_profile
 
 
 class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
@@ -20,11 +22,20 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             input_root = Path(directory)
             (input_root / "facts.md").write_text("grounded fact\n", encoding="utf-8")
-            request = EvidenceBriefRequest(question="What is grounded?", files=["facts.md"])
+            profile = release_profile()
+            key = private_file(input_root, "api-key", "secret-api-key-" + "x" * 32)
+            request = EvidenceBriefRequest(
+                question="What is grounded?",
+                files=["facts.md"],
+                disclosure_profile="external_disclosed_v1",
+                disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+                external_disclosure_ack=True,
+            )
             canonical = load_request(
                 input_root=input_root,
                 question=request.question,
                 selected_paths=request.files,
+                disclosure_profile=request.disclosure_profile,
             )
             response = {
                 "answer": "Grounded answer.",
@@ -53,7 +64,14 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                     request=request,
                     authorization=f"Bearer {token}",
                     idempotency_key=workflow_id,
-                    settings=Settings(input_root=input_root, token=token),
+                    settings=Settings(
+                        input_root=input_root,
+                        token=token,
+                        release_profile=profile,
+                        release_profile_digest=profile.digest(),
+                        openai_api_key_file=key,
+                        credential_generation=profile.credential_generation,
+                    ),
                 )
 
         self.assertEqual(result.workflow_id, workflow_id)
@@ -61,6 +79,9 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
             evidence_brief_workflow,
             canonical.workflow_payload(),
             workflow_id,
-            "/run/codex",
-            "gpt-5.6-sol",
+            profile.model_dump(mode="json"),
+            str(key),
+            ANY,
         )
+        admitted_at = datetime.fromisoformat(enqueue.await_args.args[-1])
+        self.assertIsNotNone(admitted_at.tzinfo)

@@ -1,60 +1,34 @@
 from __future__ import annotations
 
+import json
 import os
-import stat
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
-from glupta_agi.settings import Settings, SettingsError, _validate_codex_runtime, get_settings
-
-
-def _private_file(root: Path, name: str, value: str) -> Path:
-    path = root / name
-    path.write_text(value, encoding="utf-8")
-    path.chmod(0o600)
-    return path
+from glupta_agi.inference import PINNED_MODEL
+from glupta_agi.settings import Settings, SettingsError, get_settings
+from tests.helpers import private_file, release_profile, write_profile
 
 
 class SettingsTests(unittest.TestCase):
-    def test_codex_metadata_stabilization_is_bounded_and_fail_closed(self) -> None:
-        valid = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=os.geteuid())
-        wrong_mode = SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=os.geteuid())
-        wrong_owner = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=os.geteuid() + 1)
-        symlink = SimpleNamespace(st_mode=stat.S_IFLNK | 0o600, st_uid=os.geteuid())
-
-        with (
-            patch("glupta_agi.settings.Path.lstat", return_value=valid) as observe,
-            patch("glupta_agi.settings.time.sleep") as wait,
+    def test_every_release_profile_field_is_required_and_frozen_policy_cannot_drift(self) -> None:
+        raw = release_profile().model_dump(mode="json")
+        for field in raw:
+            with self.subTest(missing=field):
+                candidate = {key: value for key, value in raw.items() if key != field}
+                with self.assertRaises(ValueError):
+                    type(release_profile()).model_validate(candidate)
+        for field, value in (
+            ("model", "gpt-5.6"),
+            ("max_usd_micros", 1_850_001),
+            ("sdk_retries", 1),
+            ("store", True),
+            ("endpoint", "https://example.com/v1"),
         ):
-            _validate_codex_runtime(Path("/run/codex"))
-        self.assertEqual(observe.call_count, 1)
-        wait.assert_not_called()
-
-        for first in (OSError("unavailable"), wrong_mode):
-            with self.subTest(first=type(first).__name__):
-                with (
-                    patch("glupta_agi.settings.Path.lstat", side_effect=[first, valid]) as observe,
-                    patch("glupta_agi.settings.time.sleep") as wait,
-                ):
-                    _validate_codex_runtime(Path("/run/codex"))
-                self.assertEqual(observe.call_count, 2)
-                wait.assert_called_once_with(0.5)
-
-        for invalid in (OSError("unavailable"), symlink, wrong_mode, wrong_owner):
-            with self.subTest(invalid=type(invalid).__name__):
-                with (
-                    patch(
-                        "glupta_agi.settings.Path.lstat", side_effect=[invalid, invalid]
-                    ) as observe,
-                    patch("glupta_agi.settings.time.sleep") as wait,
-                ):
-                    with self.assertRaisesRegex(SettingsError, "secondary Codex subscription"):
-                        _validate_codex_runtime(Path("/run/codex"))
-                self.assertEqual(observe.call_count, 2)
-                wait.assert_called_once_with(0.5)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                release_profile(**{field: value})
 
     def test_process_settings_are_validated_once(self) -> None:
         expected = Settings(input_root=Path("/inputs"), token="t" * 32)
@@ -67,136 +41,120 @@ class SettingsTests(unittest.TestCase):
         finally:
             get_settings.cache_clear()
 
-    def test_private_file_capability_is_required(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            token_path = _private_file(root, "token", "a" * 32)
-            with patch.dict(
-                os.environ,
-                {"GLUPTA_INTAKE_TOKEN_FILE": str(token_path)},
-                clear=True,
-            ), patch("glupta_agi.settings._validate_codex_runtime"):
-                settings = Settings.from_environment()
-            self.assertTrue(settings.authenticates("a" * 32))
-            self.assertFalse(settings.authenticates("b" * 32))
-            self.assertEqual(settings.codex_model, "gpt-5.6-sol")
-
-    def test_group_readable_or_short_capability_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            token_path = Path(directory) / "token"
-            token_path.write_text("short", encoding="utf-8")
-            token_path.chmod(0o640)
-            with patch.dict(os.environ, {"GLUPTA_INTAKE_TOKEN_FILE": str(token_path)}, clear=True):
-                with self.assertRaises(SettingsError):
-                    Settings.from_environment()
-
-    def test_symlink_capability_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "target"
-            link = Path(directory) / "link"
-            target.write_text("a" * 32, encoding="utf-8")
-            target.chmod(0o600)
-            link.symlink_to(target)
-            with patch.dict(os.environ, {"GLUPTA_INTAKE_TOKEN_FILE": str(link)}, clear=True):
-                with self.assertRaises(SettingsError):
-                    Settings.from_environment()
-
-    def test_builds_dbos_url_from_private_password_file(self) -> None:
+    def test_loads_complete_release_profile_without_reading_key_contents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            token = _private_file(root, "token", "t" * 32)
-            password = _private_file(root, "postgres-password", "a b/c")
-            with patch.dict(
-                os.environ,
-                {
-                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
-                    "GLUPTA_POSTGRES_PASSWORD_FILE": str(password),
-                    "GLUPTA_POSTGRES_USER": "glupta user",
-                    "GLUPTA_POSTGRES_DB": "glupta/db",
-                },
-                clear=True,
-            ), patch("glupta_agi.settings._validate_codex_runtime"):
-                settings = Settings.from_environment()
-                self.assertEqual(
-                    settings.dbos_system_database_url(),
-                    "postgresql://glupta%20user:a%20b%2Fc@postgres:5432/glupta%2Fdb",
-                )
+            token = private_file(root, "intake-token", "t" * 32)
+            profile_path = write_profile(root)
+            key = private_file(root, "api-key", "secret-api-key-" + "x" * 32)
+            real_open = os.open
+            opened: list[Path] = []
 
-    def test_unpinned_model_and_remote_database_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            token = _private_file(root, "token", "t" * 32)
-            with patch.dict(
-                os.environ,
-                {
-                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
-                    "GLUPTA_CODEX_MODEL": "unpinned-model",
-                },
-                clear=True,
-            ), patch("glupta_agi.settings._validate_codex_runtime"):
-                with self.assertRaisesRegex(SettingsError, "pinned Codex model"):
-                    Settings.from_environment()
+            def observe(path: object, flags: int, *args: object, **kwargs: object) -> int:
+                opened.append(Path(path))
+                return real_open(path, flags, *args, **kwargs)
 
-            with patch.dict(
-                os.environ,
-                {
-                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
-                    "DBOS_SYSTEM_DATABASE_URL": "postgresql://user:pass@db.example.com/glupta",
-                },
-                clear=True,
-            ), patch("glupta_agi.settings._validate_codex_runtime"):
-                settings = Settings.from_environment()
-                with self.assertRaisesRegex(SettingsError, "must be local"):
-                    settings.dbos_system_database_url()
-
-            with patch.dict(
-                os.environ,
-                {
-                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
-                    "DBOS_SYSTEM_DATABASE_URL": "sqlite:///crawl.db",
-                },
-                clear=True,
-            ), patch("glupta_agi.settings._validate_codex_runtime"):
-                settings = Settings.from_environment()
-                with self.assertRaisesRegex(SettingsError, "must be PostgreSQL"):
-                    settings.dbos_system_database_url()
-
-    def test_codex_home_must_be_an_absolute_authenticated_runtime(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            token = _private_file(Path(temporary), "token", "t" * 32)
-            with patch.dict(
-                os.environ,
-                {
-                    "GLUPTA_INTAKE_TOKEN_FILE": str(token),
-                    "GLUPTA_CODEX_HOME": "relative-codex-home",
-                },
-                clear=True,
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GLUPTA_INTAKE_TOKEN_FILE": str(token),
+                        "GLUPTA_RELEASE_PROFILE_FILE": str(profile_path),
+                        "GLUPTA_OPENAI_API_KEY_FILE": str(key),
+                        "GLUPTA_CREDENTIAL_GENERATION": "1",
+                    },
+                    clear=True,
+                ),
+                patch("glupta_agi.settings.os.open", side_effect=observe),
             ):
-                with self.assertRaisesRegex(SettingsError, "secondary Codex subscription"):
-                    Settings.from_environment()
+                settings = Settings.from_environment()
 
-    def test_codex_auth_file_must_be_private_regular_and_owned(self) -> None:
+            self.assertTrue(settings.authenticates("t" * 32))
+            self.assertEqual(settings.model, PINNED_MODEL)
+            self.assertEqual(settings.release_profile_digest, release_profile().digest())
+            self.assertEqual(opened, [token, profile_path])
+
+    def test_missing_unsafe_or_expired_release_evidence_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            token = _private_file(root, "token", "t" * 32)
-            codex_home = root / "codex"
-            codex_home.mkdir()
-            auth = _private_file(codex_home, "auth.json", "opaque-test-value")
-            environment = {
+            token = private_file(root, "intake-token", "t" * 32)
+            key = private_file(root, "api-key", "secret-api-key-" + "x" * 32)
+            base = {
                 "GLUPTA_INTAKE_TOKEN_FILE": str(token),
-                "GLUPTA_CODEX_HOME": str(codex_home),
+                "GLUPTA_OPENAI_API_KEY_FILE": str(key),
+                "GLUPTA_CREDENTIAL_GENERATION": "1",
             }
-            with patch.dict(os.environ, environment, clear=True):
-                self.assertEqual(Settings.from_environment().codex_home, codex_home)
-
-            auth.chmod(0o640)
-            with patch.dict(os.environ, environment, clear=True):
-                with self.assertRaisesRegex(SettingsError, "secondary Codex subscription"):
+            for profile_path in (root / "missing", write_profile(root)):
+                if profile_path.exists():
+                    profile_path.chmod(0o640)
+                with (
+                    self.subTest(profile_path=profile_path),
+                    patch.dict(
+                        os.environ,
+                        {**base, "GLUPTA_RELEASE_PROFILE_FILE": str(profile_path)},
+                        clear=True,
+                    ),
+                    self.assertRaises(SettingsError),
+                ):
                     Settings.from_environment()
 
-            auth.unlink()
-            target = _private_file(root, "auth-target", "opaque-test-value")
-            auth.symlink_to(target)
-            with patch.dict(os.environ, environment, clear=True):
-                with self.assertRaisesRegex(SettingsError, "secondary Codex subscription"):
-                    Settings.from_environment()
+            expired = release_profile(
+                credential_expires_at="2020-01-01T00:00:00Z",
+                evidence_expires_at="2020-01-01T00:00:00Z",
+            )
+            expired_path = private_file(
+                root, "expired.json", json.dumps(expired.model_dump(mode="json"))
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {**base, "GLUPTA_RELEASE_PROFILE_FILE": str(expired_path)},
+                    clear=True,
+                ),
+                self.assertRaisesRegex(SettingsError, "expired"),
+            ):
+                Settings.from_environment()
+
+    def test_key_must_be_absolute_private_regular_and_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            token = private_file(root, "intake-token", "t" * 32)
+            profile_path = write_profile(root)
+            key = private_file(root, "api-key", "secret-api-key-" + "x" * 32)
+            key.chmod(0o640)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GLUPTA_INTAKE_TOKEN_FILE": str(token),
+                        "GLUPTA_RELEASE_PROFILE_FILE": str(profile_path),
+                        "GLUPTA_OPENAI_API_KEY_FILE": str(key),
+                        "GLUPTA_CREDENTIAL_GENERATION": "1",
+                    },
+                    clear=True,
+                ),
+                self.assertRaises(SettingsError),
+            ):
+                Settings.from_environment()
+
+    def test_credential_generation_must_match_approved_runtime_config(self) -> None:
+        profile = release_profile(credential_generation=2)
+        settings = Settings(
+            input_root=Path("/inputs"),
+            token="t" * 32,
+            release_profile=profile,
+            release_profile_digest=profile.digest(),
+            openai_api_key_file=Path("/private/key"),
+            credential_generation=1,
+        )
+        with self.assertRaisesRegex(SettingsError, "generation"):
+            settings.require_external_profile()
+
+    def test_database_must_be_local_postgresql(self) -> None:
+        settings = Settings(input_root=Path("/inputs"), token="t" * 32)
+        for url in ("sqlite:///crawl.db", "postgresql://u:p@db.example.com/crawl"):
+            with (
+                patch.dict(os.environ, {"DBOS_SYSTEM_DATABASE_URL": url}, clear=True),
+                self.assertRaises(SettingsError),
+            ):
+                settings.dbos_system_database_url()

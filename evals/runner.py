@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,11 +13,13 @@ from typing import Any
 from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorContext
 
-from .brief import build_user_prompt
-from .contracts import EvidenceBrief
-from .effects import initialize
-from .settings import PINNED_CODEX_MODEL, Settings
-from .workflow import _run_codex
+from glupta_agi.brief import build_user_prompt
+from glupta_agi.client import _uuid7
+from glupta_agi.contracts import EvidenceBrief
+from glupta_agi.effects import initialize
+from glupta_agi.inference import PINNED_MODEL
+from glupta_agi.settings import Settings
+from glupta_agi.workflow import _CrawlModelPacket, _run_inference
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,7 @@ class GroundedBriefEvaluator(Evaluator[EvalInput, EvidenceBrief, EvalExpected]):
         if expected is None:
             raise ValueError("eval case is missing expected metadata")
         output = ctx.output
-        response_text = "\n".join(
-            [output.answer, *output.uncertainties, *output.next_decisions]
-        )
+        response_text = "\n".join([output.answer, *output.uncertainties, *output.next_decisions])
         uncertainty_text = "\n".join(output.uncertainties)
         required = [
             point for point in expected.required_points if not _contains(response_text, point)
@@ -132,30 +131,35 @@ def load_dataset(
 def run_eval(dataset: Dataset[EvalInput, EvidenceBrief, EvalExpected]) -> Any:
     settings = Settings.from_environment()
     initialize(settings.dbos_system_database_url())
+    profile, credential_file = settings.require_external_profile()
 
     def generate(item: EvalInput) -> EvidenceBrief:
-        return _run_codex(
-            build_user_prompt(item.question, item.sources),
-            item.sources,
-            str(settings.codex_home),
-            PINNED_CODEX_MODEL,
-            f"crawl-eval-{uuid.uuid4().hex}",
-            hashlib.sha256(
-                json.dumps(
-                    {"question": item.question, "sources": item.sources},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode()
-            ).hexdigest(),
+        brief, _usage = _run_inference(
+            _CrawlModelPacket(
+                prompt=build_user_prompt(item.question, item.sources),
+                sources=item.sources,
+                release_profile=profile,
+                credential_file=str(credential_file),
+                admitted_at=datetime.now(UTC),
+                workflow_id=_uuid7(),
+                request_digest=hashlib.sha256(
+                    json.dumps(
+                        {"question": item.question, "sources": item.sources},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            )
         )
+        return brief
 
     return dataset.evaluate_sync(
         generate,
-        name=f"crawl-{PINNED_CODEX_MODEL}",
+        name=f"crawl-{PINNED_MODEL}",
         task_name="evidence_brief_v1",
         max_concurrency=1,
         progress=True,
-        metadata={"model": PINNED_CODEX_MODEL},
+        metadata={"model": PINNED_MODEL},
     )
 
 
@@ -171,9 +175,7 @@ def build_receipt(report: Any, dataset_path: Path) -> dict[str, Any]:
                 "assertions": assertions,
                 "output": case.output.model_dump(mode="json"),
                 "reasons": {
-                    name: result.reason
-                    for name, result in case.assertions.items()
-                    if result.reason
+                    name: result.reason for name, result in case.assertions.items() if result.reason
                 },
             }
         )
@@ -181,7 +183,7 @@ def build_receipt(report: Any, dataset_path: Path) -> dict[str, Any]:
     return {
         "schema": "CrawlEvalReceiptV1",
         "created_at": datetime.now(UTC).isoformat(),
-        "model": PINNED_CODEX_MODEL,
+        "model": PINNED_MODEL,
         "dataset_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
         "passed": not failures and all(item["passed"] for item in cases),
         "case_count": len(cases) + len(failures),

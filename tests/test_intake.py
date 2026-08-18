@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from glupta_agi.contracts import EvidenceBriefRequest
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefRequest
 from glupta_agi.intake import IntakeError, load_request
 
 
@@ -39,23 +39,42 @@ class IntakeTests(unittest.TestCase):
     def test_removed_artifact_option_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):
             EvidenceBriefRequest.model_validate(
-                {"question": "q", "files": ["notes/facts.md"], "write_artifacts": False}
+                {
+                    "question": "q",
+                    "files": ["notes/facts.md"],
+                    "disclosure_profile": "external_disclosed_v1",
+                    "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+                    "external_disclosure_ack": True,
+                    "write_artifacts": False,
+                }
             )
 
-    def test_legacy_payload_still_matches_for_durable_replay(self) -> None:
+    def test_disclosure_profile_is_bound_for_durable_replay(self) -> None:
         canonical = load_request(
             input_root=self.root,
             question="What changed?",
             selected_paths=["notes/facts.md"],
         )
-        legacy = {
+        recorded = {
             **canonical.workflow_payload(),
-            "request_digest": "legacy-0.2.0-digest",
-            "write_artifacts": False,
         }
 
-        self.assertTrue(canonical.matches_recorded_payload(legacy))
-        self.assertFalse(canonical.matches_recorded_payload({**legacy, "question": "other"}))
+        self.assertTrue(canonical.matches_recorded_payload(recorded))
+        self.assertFalse(
+            canonical.matches_recorded_payload({**recorded, "disclosure_profile": "local_only"})
+        )
+        self.assertFalse(
+            canonical.matches_recorded_payload({**recorded, "external_disclosure_ack": False})
+        )
+        with self.assertRaisesRegex(IntakeError, "acknowledgement"):
+            load_request(
+                input_root=self.root,
+                question="What changed?",
+                selected_paths=["notes/facts.md"],
+                disclosure_notice_digest="0" * 64,
+                external_disclosure_ack=True,
+            )
+        self.assertEqual(canonical.disclosure_notice_digest, DISCLOSURE_NOTICE_DIGEST)
 
     def test_changed_bytes_change_digest(self) -> None:
         before = load_request(input_root=self.root, question="q", selected_paths=["notes/facts.md"])

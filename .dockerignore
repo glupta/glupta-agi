@@ -4,5 +4,9 @@ __pycache__
 .pytest_cache
 .ruff_cache
 artifacts
+dist
+docs
+evals
 inputs
 runtime
+tests

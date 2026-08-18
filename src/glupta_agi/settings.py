@@ -1,19 +1,18 @@
-"""Runtime settings with file-backed capability loading."""
+"""Fail-closed runtime settings and file-backed capability metadata."""
 
 from __future__ import annotations
 
 import hmac
 import os
 import stat
-import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from .inference import PINNED_MODEL, ReleaseProfile
+
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
-PINNED_CODEX_MODEL = "gpt-5.6-sol"
-DEFAULT_CODEX_HOME = Path("/run/codex")
 
 
 class SettingsError(RuntimeError):
@@ -21,82 +20,112 @@ class SettingsError(RuntimeError):
 
 
 def _read_private_file(path: Path, *, label: str, maximum_bytes: int) -> str:
+    file_fd = -1
     try:
         file_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            metadata = os.fstat(file_fd)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
-                raise SettingsError(f"{label} file must be private and regular")
-            with os.fdopen(file_fd, "r", encoding="utf-8") as secret_file:
-                file_fd = -1
-                value = secret_file.read(maximum_bytes + 1).strip()
-        finally:
-            if file_fd >= 0:
-                os.close(file_fd)
-    except OSError as exc:
+        metadata = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.geteuid()
+        ):
+            raise SettingsError(f"{label} file must be owned, regular, and mode 0600")
+        with os.fdopen(file_fd, encoding="utf-8") as private_file:
+            file_fd = -1
+            value = private_file.read(maximum_bytes + 1).strip()
+    except SettingsError:
+        raise
+    except (OSError, UnicodeError) as exc:
         raise SettingsError(f"{label} file is unavailable") from exc
-    if not value or len(value.encode("utf-8")) > maximum_bytes:
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+    if not value or len(value.encode()) > maximum_bytes:
         raise SettingsError(f"{label} length is invalid")
     return value
 
 
-def _validate_codex_runtime(home: Path) -> None:
-    if not home.is_absolute():
-        raise SettingsError("Crawl must use the configured secondary Codex subscription")
-    for attempt in range(2):
-        try:
-            metadata = (home / "auth.json").lstat()
-        except OSError:
-            metadata = None
-        if metadata is not None and (
-            stat.S_ISREG(metadata.st_mode)
-            and not stat.S_ISLNK(metadata.st_mode)
-            and stat.S_IMODE(metadata.st_mode) == 0o600
-            and metadata.st_uid == os.geteuid()
-        ):
-            return
-        if attempt == 0:
-            time.sleep(0.5)
-    raise SettingsError("Crawl must use the configured secondary Codex subscription")
+def _validate_private_path(path: Path, *, label: str) -> None:
+    if not path.is_absolute():
+        raise SettingsError(f"{label} path must be absolute")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise SettingsError(f"{label} file is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise SettingsError(f"{label} file must be owned, regular, and mode 0600")
 
 
 @dataclass(frozen=True)
 class Settings:
     input_root: Path
     token: str
-    codex_home: Path = DEFAULT_CODEX_HOME
-    codex_model: str = PINNED_CODEX_MODEL
+    release_profile: ReleaseProfile | None = None
+    release_profile_digest: str = ""
+    openai_api_key_file: Path | None = None
+    credential_generation: int = 0
+    model: str = PINNED_MODEL
 
     @classmethod
     def from_environment(cls) -> Settings:
-        token_path = Path(os.environ.get("GLUPTA_INTAKE_TOKEN_FILE", "/run/secrets/intake-token"))
+        token_path = Path(os.environ.get("GLUPTA_INTAKE_TOKEN_FILE", "/run/private/intake-token"))
         token = _read_private_file(token_path, label="intake capability", maximum_bytes=4096)
-        if not 32 <= len(token) <= 4096:
+        if not 32 <= len(token.encode()) <= 4096:
             raise SettingsError("intake capability length is invalid")
-        codex_home = Path(os.environ.get("GLUPTA_CODEX_HOME", str(DEFAULT_CODEX_HOME)))
-        codex_model = os.environ.get("GLUPTA_CODEX_MODEL", PINNED_CODEX_MODEL)
-        _validate_codex_runtime(codex_home)
-        if codex_model != PINNED_CODEX_MODEL:
-            raise SettingsError("Crawl must use the pinned Codex model")
-        return cls(
-            input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/inputs")),
-            token=token,
-            codex_home=codex_home,
-            codex_model=codex_model,
+        profile_path = Path(
+            os.environ.get("GLUPTA_RELEASE_PROFILE_FILE", "/run/private/release-profile.json")
         )
+        try:
+            profile = ReleaseProfile.model_validate_json(
+                _read_private_file(profile_path, label="release profile", maximum_bytes=32_768)
+            )
+        except ValueError as exc:
+            raise SettingsError("release profile is invalid") from exc
+        if not profile.current_at():
+            raise SettingsError("release profile evidence is expired")
+        credential_path = Path(
+            os.environ.get("GLUPTA_OPENAI_API_KEY_FILE", "/run/private/openai-api-key")
+        )
+        _validate_private_path(credential_path, label="OpenAI credential")
+        try:
+            generation = int(os.environ["GLUPTA_CREDENTIAL_GENERATION"])
+        except (KeyError, ValueError) as exc:
+            raise SettingsError("credential generation is unavailable") from exc
+        if generation < 1 or generation != profile.credential_generation:
+            raise SettingsError("credential generation does not match the release profile")
+        return cls(
+            input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/data/inputs")),
+            token=token,
+            release_profile=profile,
+            release_profile_digest=profile.digest(),
+            openai_api_key_file=credential_path,
+            credential_generation=generation,
+        )
+
+    def require_external_profile(self) -> tuple[ReleaseProfile, Path]:
+        if self.release_profile is None or self.openai_api_key_file is None:
+            raise SettingsError("external inference release profile is unavailable")
+        if self.release_profile.digest() != self.release_profile_digest:
+            raise SettingsError("external inference release profile changed")
+        if not self.release_profile.current_at():
+            raise SettingsError("release profile evidence is expired")
+        if self.credential_generation != self.release_profile.credential_generation:
+            raise SettingsError("credential generation does not match the release profile")
+        return self.release_profile, self.openai_api_key_file
 
     def dbos_system_database_url(self) -> str:
         explicit = os.environ.get("DBOS_SYSTEM_DATABASE_URL")
         if explicit:
             parsed = urlsplit(explicit)
-            if parsed.scheme != "postgresql":
-                raise SettingsError("DBOS system database must be PostgreSQL")
-            if parsed.hostname not in LOCAL_HOSTS:
-                raise SettingsError("DBOS PostgreSQL endpoint must be local")
+            if parsed.scheme != "postgresql" or parsed.hostname not in LOCAL_HOSTS:
+                raise SettingsError("DBOS system database must be local PostgreSQL")
             return explicit
-
         password_path = Path(
-            os.environ.get("GLUPTA_POSTGRES_PASSWORD_FILE", "/run/secrets/postgres-password")
+            os.environ.get("GLUPTA_POSTGRES_PASSWORD_FILE", "/run/private/postgres-password")
         )
         password = _read_private_file(password_path, label="PostgreSQL password", maximum_bytes=512)
         user = quote(os.environ.get("GLUPTA_POSTGRES_USER", "glupta"), safe="")
@@ -113,5 +142,4 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Load and validate the immutable process settings exactly once."""
     return Settings.from_environment()

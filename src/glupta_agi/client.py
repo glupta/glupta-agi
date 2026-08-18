@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .contracts import EvidenceBriefResponse
+from .contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefResponse
 from .intake import IntakeError, _validate_relative_path
 
 MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_SECONDS = 2 * 1024 * 1024, 330
@@ -97,7 +97,11 @@ def _workflow_id(raw: str | None) -> str:
     return candidate
 
 
-def _request_payload(question: str, files: Sequence[str]) -> bytes:
+def _request_payload(
+    question: str, files: Sequence[str], *, external_disclosure_ack: bool
+) -> bytes:
+    if not external_disclosure_ack:
+        raise ClientError("external disclosure acknowledgement is required")
     normalized_question = question.strip()
     if not normalized_question or len(normalized_question.encode()) > 32 * 1024:
         raise ClientError("question must contain between 1 and 32768 UTF-8 bytes")
@@ -109,7 +113,13 @@ def _request_payload(question: str, files: Sequence[str]) -> bytes:
     except IntakeError as exc:
         raise ClientError(str(exc)) from exc
     return json.dumps(
-        {"question": normalized_question, "files": list(files)},
+        {
+            "question": normalized_question,
+            "files": list(files),
+            "disclosure_profile": "external_disclosed_v1",
+            "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+            "external_disclosure_ack": True,
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
@@ -122,11 +132,12 @@ def submit(
     token_file: Path,
     idempotency_key: str | None = None,
     *,
+    external_disclosure_ack: bool = False,
     opener: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     base_url = _validate_endpoint(endpoint)
     workflow_id = _workflow_id(idempotency_key)
-    payload = _request_payload(question, files)
+    payload = _request_payload(question, files, external_disclosure_ack=external_disclosure_ack)
     capability = _read_capability(token_file)
     request = urllib.request.Request(  # noqa: S310 -- URL is validated loopback HTTP
         f"{base_url}/v1/evidence-brief",
@@ -163,6 +174,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--endpoint", default="http://127.0.0.1:8765")
     parser.add_argument("--token-file", type=Path, default=Path("runtime/intake-token"))
     parser.add_argument("--idempotency-key")
+    parser.add_argument(
+        "--ack-external-disclosure",
+        action="store_true",
+        help="acknowledge that selected source bytes and question are sent to OpenAI",
+    )
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
@@ -171,7 +187,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         result = submit(
-            args.question, args.files, args.endpoint, args.token_file, args.idempotency_key
+            args.question,
+            args.files,
+            args.endpoint,
+            args.token_file,
+            args.idempotency_key,
+            external_disclosure_ack=args.ack_external_disclosure,
         )
     except ClientError as exc:
         print(f"error: {exc}", file=sys.stderr)

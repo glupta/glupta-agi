@@ -5,8 +5,8 @@ from pathlib import Path
 
 from pydantic_evals.evaluators import EvaluatorContext
 
+from evals.runner import EvalInput, GroundedBriefEvaluator, load_dataset
 from glupta_agi.contracts import Citation, EvidenceBrief
-from glupta_agi.evals import EvalInput, GroundedBriefEvaluator, load_dataset
 
 
 class CrawlEvalTests(unittest.TestCase):

@@ -9,7 +9,12 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Current build state:
+Version `0.3.0` is a **dispatch-held candidate**, not a production release.
+It replaces the unsupported consumer-session route with a provider-supported
+OpenAI Responses API edge, while requiring external account and release evidence
+that this repository cannot manufacture.
+
+Candidate controls:
 
 - secure intake and request canonicalization are implemented;
 - DBOS owns durable execution and idempotency;
@@ -19,17 +24,24 @@ Current build state:
 - one predeclared `model-0` effect slot fences the external model call before
   dispatch through a DBOS datasource transaction and fails closed when a crash
   leaves its outcome ambiguous;
-- the official Codex SDK binds ephemeral thread and turn IDs to that effect;
-  transcript history is disabled and per-call SQLite state is deleted from the
-  bounded tmpfs on normal closure; the turn is read-only, web/tool-disabled,
-  clean-environment launched, and pinned to `gpt-5.6-sol` with `medium` reasoning;
+- the official OpenAI SDK sends exactly one synchronous Responses API request
+  with SDK retries disabled, `store=false`, no tools, no redirects or ambient
+  proxy configuration, `gpt-5.6-sol`, and `medium` reasoning;
+- the frozen effect binds the request-body and release-profile digests, a
+  conservative 270,000-token input ceiling, 4,000-token total output/reasoning
+  ceiling, $1.85 USD upper-bound reservation (including the documented cache-write
+  premium), and 300-second queue/wall limits;
+- successful replay returns the recorded provider request/response IDs, token
+  usage, conservative USD upper bound, and typed output instead of fabricating
+  missing usage;
 - runtime bearer material is read from a private file and never persisted;
 - PostgreSQL is not published and the intake API is loopback-only;
 - no live messaging or action tools are present.
 
-Selected file contents are sent to the secondary Codex subscription to generate
-the brief. Only select files that are appropriate to disclose to OpenAI; this
-MVP does not claim local de-identification.
+Selected file contents and the question are sent to the named OpenAI project.
+The local client requires `--ack-external-disclosure`; only select files that
+are appropriate to disclose. `store=false` does not itself prove zero provider
+retention, so a current data-terms receipt remains mandatory release evidence.
 
 The Crawl acceptance boundary is this repository: one useful durable `OBSERVE`
 brief, durable workflow/effect state, authenticated loopback intake, explicit
@@ -38,14 +50,14 @@ until measured Crawl evidence earns the next Blueprint stage.
 
 ## Quality loop
 
-Pydantic Evals runs the frozen 20-case workload against the same fenced Codex
+Pydantic Evals runs the frozen 20-case workload against the same fenced OpenAI
 generator used by DBOS. It runs sequentially, prints a report, and saves a
 machine-readable receipt outside git. Pydantic AI's delegation, programmatic
 hand-off, and graph patterns are complexity levels, not components Crawl must
 install; the single-agent pattern is the only one this stage has earned.
 
 ```sh
-uv run --extra dev python -m glupta_agi.evals --output runtime/evals/latest.json
+uv run --extra dev python -m evals.runner --output runtime/evals/latest.json
 ```
 
 Use `--case EV-001-single-source` or `--limit 1` for a bounded probe. A failed
@@ -59,25 +71,28 @@ uv run --extra dev pytest -q
 uv lock --check
 ```
 
-## Local deployment
+## Held deployment contract
 
-The Community profile is exactly one non-root app executor plus PostgreSQL.
-Only the intake port is published, on loopback. Codex mutable state is confined
-to a bounded, hardened container tmpfs. Only the dedicated secondary
-subscription's `auth.json` is mounted from the host; the rest of that Codex home
-is never exposed to the app.
+The Community profile remains exactly one non-root app executor plus PostgreSQL.
+Only the intake port is published on loopback. The app has a read-only root,
+drops all Linux capabilities, forbids privilege escalation, and has bounded
+CPU, memory, PIDs, and temporary storage.
 
-Create `inputs/` and `runtime/`, then place private mode-`0600` values at
-`runtime/intake-token` and `runtime/postgres-password`. The secondary credential
-must be dedicated to Crawl for the deployment lifetime; do not run another
-Codex process or machine from the same credential family concurrently. Verify
-only its metadata, then point the deployment-only mount variable at the exact
-regular, non-symlink mode-`0600` file and start the two-service profile:
+Do not start this candidate until an exact release profile has been produced and
+approved. The private mode-`0600` JSON profile must bind the dedicated OpenAI
+project/service-account/key identifiers and generation, disclosure and rights
+evidence, data terms and region, model, rate and token/USD/time ceilings, expiry,
+price schedule, manifest, SBOM, provenance, signature, approval, and isolated
+rollback rehearsal. The API key is a separate private mode-`0600` file and is
+read only after the durable effect reservation exists. Neither file is committed.
+
+Once every independent release gate is satisfied, the operator may set the two
+absolute mount paths and start the profile:
 
 ```sh
-GLUPTA_CODEX_AUTH_FILE=/absolute/path/to/secondary/codex-home/auth.json
-uv run python -c 'import os,stat,sys; s=os.lstat(sys.argv[1]); assert stat.S_ISREG(s.st_mode) and not stat.S_ISLNK(s.st_mode) and s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == 0o600' "$GLUPTA_CODEX_AUTH_FILE"
-export GLUPTA_SECONDARY_CODEX_AUTH_FILE="$GLUPTA_CODEX_AUTH_FILE"
+export GLUPTA_RELEASE_PROFILE_FILE=/absolute/path/to/release-profile.json
+export GLUPTA_OPENAI_API_KEY_FILE=/absolute/path/to/openai-api-key
+export GLUPTA_CREDENTIAL_GENERATION=1
 export GLUPTA_UID=$(id -u) GLUPTA_GID=$(id -g)
 docker compose up -d --build --remove-orphans
 curl --fail http://127.0.0.1:8765/healthz
@@ -92,6 +107,7 @@ the grounded Markdown brief, while `--json` returns the complete typed result:
 
 ```sh
 uv run glupta-crawl-submit \
+  --ack-external-disclosure \
   --question "What changed, what is uncertain, and what should we decide next?" \
   notes.md evidence/current.txt
 ```
