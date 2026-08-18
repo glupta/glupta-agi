@@ -14,11 +14,18 @@ services:
       GLUPTA_CODEX_HOME: /run/codex
       GLUPTA_HOST: 0.0.0.0
       GLUPTA_PORT: 8080
+    tmpfs:
+      - "/run/codex:rw,noexec,nosuid,nodev,size=67108864,uid=${GLUPTA_UID:-501},gid=${GLUPTA_GID:-20},mode=0700"
     volumes:
       - ${GLUPTA_INPUT_DIR:-./inputs}:/data/inputs:ro
       - ${GLUPTA_RUNTIME_DIR:-./runtime}/intake-token:/run/private/intake-token:ro
       - ${GLUPTA_RUNTIME_DIR:-./runtime}/postgres-password:/run/private/postgres-password:ro
-      - ${GLUPTA_SECONDARY_CODEX_HOME:?set GLUPTA_SECONDARY_CODEX_HOME}:/run/codex
+      - type: bind
+        source: ${GLUPTA_SECONDARY_CODEX_AUTH_FILE:?set GLUPTA_SECONDARY_CODEX_AUTH_FILE}
+        target: /run/codex/auth.json
+        read_only: false
+        bind:
+          create_host_path: false
     ports:
       - 127.0.0.1:${GLUPTA_PORT:-8765}:8080
     depends_on:

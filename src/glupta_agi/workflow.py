@@ -9,7 +9,15 @@ from typing import Any
 
 from codex_cli_bin import bundled_codex_path, bundled_path_dir
 from dbos import DBOS, Queue
-from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
+from openai_codex import (
+    ApprovalMode,
+    Codex,
+    CodexConfig,
+    CodexError,
+    CodexRpcError,
+    Sandbox,
+    TransportClosedError,
+)
 from openai_codex.generated.v2_all import ReasoningEffort, WebSearchMode
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import Agent
@@ -47,10 +55,27 @@ def _codex_launch_args(environment: dict[str, str]) -> tuple[str, ...]:
         "-i",
         *assignments,
         str(bundled_codex_path()),
+        "-c",
+        'cli_auth_credentials_store="file"',
         "app-server",
         "--listen",
         "stdio://",
     )
+
+
+def _provider_error_token(error: BaseException) -> str:
+    """Return a bounded token without persisting provider error details."""
+    if isinstance(error, TransportClosedError):
+        return "provider_transport_closed"
+    if isinstance(error, CodexRpcError):
+        return "provider_rpc_error"
+    if isinstance(error, CodexError):
+        return "provider_sdk_error"
+    if isinstance(error, TimeoutError):
+        return "provider_timeout"
+    if isinstance(error, OSError):
+        return "provider_os_error"
+    return "provider_error"
 
 
 def _run_codex(
@@ -76,7 +101,13 @@ def _run_codex(
     if effect.state in {"returned", "reconciled"}:
         if effect.result is None:
             raise BriefGenerationError("recorded model effect has no result")
-        brief = validate(effect.result)
+        recorded_output_invalid = False
+        try:
+            brief = validate(effect.result)
+        except ValueError:
+            recorded_output_invalid = True
+        if recorded_output_invalid:
+            raise BriefGenerationError("recorded model effect failed validation") from None
         if effect.state == "returned":
             transition(workflow_id, "returned", "reconciled")
         return brief
@@ -100,6 +131,8 @@ def _run_codex(
         }
         launch_args = _codex_launch_args(environment)
         client = None
+        invalid_output = False
+        provider_failure: str | None = None
         try:
             effect = transition(workflow_id, "reserved", "dispatching")
             client = codex_factory(
@@ -155,28 +188,39 @@ def _run_codex(
             raw = result.final_response
             if not raw:
                 hold_unknown(effect, "bound_turn_has_no_response")
-            brief = validate(raw)
-            effect = transition(
-                workflow_id,
-                "turn_started",
-                "returned",
-                result=brief.model_dump(mode="json"),
-            )
-            transition(workflow_id, "returned", "reconciled")
-            return brief
+            try:
+                brief = validate(raw)
+            except ValueError:
+                invalid_output = True
+            else:
+                effect = transition(
+                    workflow_id,
+                    "turn_started",
+                    "returned",
+                    result=brief.model_dump(mode="json"),
+                )
+                transition(workflow_id, "returned", "reconciled")
+                return brief
         except AmbiguousEffectError:
             raise
-        except ValueError as exc:
-            if effect.state == "turn_started":
-                transition(workflow_id, "turn_started", "failed", hold_reason="invalid_output")
-            raise BriefGenerationError("Codex did not produce a valid grounded brief") from exc
-        except Exception as exc:
-            if effect.state in {"dispatching", "thread_started", "turn_started"}:
-                hold_unknown(effect, f"provider_error_after_{effect.state}")
-            raise BriefGenerationError("Codex provider request failed") from exc
+        except Exception as error:
+            provider_failure = _provider_error_token(error)
         finally:
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:  # noqa: S110 -- never persist raw provider cleanup errors
+                    pass
+
+        if invalid_output:
+            if effect.state == "turn_started":
+                transition(workflow_id, "turn_started", "failed", hold_reason="invalid_output")
+            raise BriefGenerationError("Codex did not produce a valid grounded brief") from None
+        if provider_failure is not None:
+            if effect.state in {"dispatching", "thread_started", "turn_started"}:
+                hold_unknown(effect, f"{provider_failure}_after_{effect.state}")
+            raise BriefGenerationError("Codex provider request failed") from None
+        raise BriefGenerationError("Codex provider request failed") from None
 
 
 def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
