@@ -14,7 +14,8 @@ import pytest
 from httpx import Request, Response
 from openai import APIStatusError
 
-from glupta_agi.inference import FrozenDispatch, canonical_digest
+from glupta_agi.contracts import canonical_digest
+from glupta_agi.inference import FrozenDispatch
 from glupta_agi.openai_adapter import (
     AdapterError,
     OpenAIResponsesAdapter,
@@ -239,6 +240,33 @@ def test_absolute_wall_deadline_cancels_transport_and_closes_client() -> None:
     case.assertLess(elapsed, 0.2)
     case.assertTrue(client.close_started)
     case.assertFalse(client.close_finished)
+
+
+def test_cleanup_only_deadline_is_ambiguous_with_response_receipt_time() -> None:
+    body = _body()
+
+    class SlowCloseClient(FakeClient):
+        async def close(self) -> None:
+            await asyncio.sleep(10)
+
+    client = SlowCloseClient(_response())
+    deadline = datetime.now(UTC) + timedelta(milliseconds=20)
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, client_factory=lambda **_kwargs: client
+        )
+        with pytest.raises(ProviderAmbiguousError) as caught:
+            _generate(
+                adapter,
+                body,
+                queue_deadline=deadline.isoformat(),
+                wall_deadline=deadline.isoformat(),
+            )
+    audit = caught.value.audit
+    case = TestCase()
+    case.assertIsNotNone(audit)
+    case.assertLessEqual(audit.completed_at, deadline)
 
 
 def test_profile_request_and_credential_drift_reject_without_transport() -> None:

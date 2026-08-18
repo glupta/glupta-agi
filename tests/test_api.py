@@ -8,11 +8,11 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
 from glupta_agi.api import evidence_brief
-from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefRequest
+from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief, EvidenceBriefRequest
 from glupta_agi.intake import load_request
 from glupta_agi.settings import Settings
 from glupta_agi.workflow import evidence_brief_workflow
-from tests.helpers import private_file, release_profile
+from tests.helpers import private_file, provider_audit, release_profile
 
 
 class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
@@ -37,14 +37,17 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                 selected_paths=request.files,
                 disclosure_profile=request.disclosure_profile,
             )
+            brief = EvidenceBrief(
+                answer="Grounded answer.", citations=[], uncertainties=[], next_decisions=[]
+            )
             response = {
-                "answer": "Grounded answer.",
-                "citations": [],
-                "uncertainties": [],
-                "next_decisions": [],
+                **brief.model_dump(mode="json"),
                 "request_digest": canonical.request_digest,
                 "workflow_id": workflow_id,
                 "markdown": "# Evidence brief\n",
+                "provider_audit": provider_audit(
+                    brief, workflow_id=workflow_id, request_digest=canonical.request_digest
+                ).model_dump(mode="json"),
             }
             handle = SimpleNamespace(get_result=AsyncMock(return_value=response))
 

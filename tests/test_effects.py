@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+import traceback
 from datetime import UTC, datetime
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
 import pytest
 
-from glupta_agi.contracts import EvidenceBrief
-from glupta_agi.effects import _effect, initialize
-from glupta_agi.inference import (
-    FrozenDispatch,
+from glupta_agi.contracts import (
+    EvidenceBrief,
     ProviderAudit,
     canonical_digest,
     provider_record_digest,
 )
+from glupta_agi.effects import AmbiguousEffectError, _effect, hold_unknown, initialize
+from glupta_agi.inference import FrozenDispatch
 
 
 def _row(**overrides: object) -> dict[str, object]:
@@ -79,6 +80,9 @@ def _bound_result_and_audit() -> tuple[dict[str, object], dict[str, object]]:
         answer="Grounded.", citations=[], uncertainties=[], next_decisions=[]
     ).model_dump(mode="json")
     provider_audit = ProviderAudit(
+        workflow_id="0198be50-0000-7000-8000-000000000000",
+        request_digest="a" * 64,
+        release_profile_digest="d" * 64,
         client_request_id="client_1",
         provider_request_id="req_1",
         response_id="resp_1",
@@ -105,9 +109,9 @@ def _bound_result_and_audit() -> tuple[dict[str, object], dict[str, object]]:
     return result, audit
 
 
-def test_returned_effect_requires_exact_result_dispatch_and_audit_binding() -> None:
+def test_reconciled_effect_requires_exact_result_dispatch_and_audit_binding() -> None:
     result, audit = _bound_result_and_audit()
-    effect = _effect(_row(state="returned", result_json=result, audit_json=audit))
+    effect = _effect(_row(state="reconciled", result_json=result, audit_json=audit))
     case = TestCase()
     case.assertEqual(effect.result, result)
     case.assertEqual(effect.audit, audit)
@@ -147,3 +151,19 @@ def test_initialize_rejects_any_prior_or_unversioned_schema() -> None:
         ):
             initialize("postgresql://local/test")
     datasource.engine.begin.assert_not_called()
+
+
+def test_unknown_hold_retries_ambiguous_ack_and_always_raises_redacted() -> None:
+    unknown = _effect(_row(state="unknown"))
+    case = TestCase()
+    with (
+        patch(
+            "glupta_agi.effects.transition",
+            side_effect=[RuntimeError("RAW_DB"), unknown],
+        ) as mark,
+        pytest.raises(AmbiguousEffectError) as caught,
+    ):
+        hold_unknown(unknown.workflow_id, "result_persistence_ambiguous")
+    case.assertEqual(mark.call_count, 2)
+    case.assertTrue(all(call.kwargs["recover_post_dispatch"] for call in mark.call_args_list))
+    case.assertNotIn("RAW_DB", "".join(traceback.format_exception(caught.value)))

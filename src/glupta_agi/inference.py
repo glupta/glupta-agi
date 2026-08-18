@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .contracts import EvidenceBrief
+from .contracts import (
+    ProviderResult,
+    canonical_digest,
+)
 
 DISCLOSURE_PROFILE = "external_disclosed_v1"
 PINNED_MODEL = "gpt-5.6-sol"
@@ -17,11 +18,6 @@ PRICE_SCHEDULE = "openai-gpt-5.6-sol-2026-08-18"
 # Reserve the documented 1.25x cache-write premium for every input token.
 INPUT_USD_MICROS_PER_MILLION = 6_250_000
 OUTPUT_USD_MICROS_PER_MILLION = 30_000_000
-
-
-def canonical_digest(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 PRICE_SCHEDULE_DIGEST = canonical_digest(
@@ -142,41 +138,6 @@ class FrozenDispatch(BaseModel):
 
     def digest(self) -> str:
         return canonical_digest(self.model_dump(mode="json"))
-
-
-class ProviderAudit(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: str = "crawl-openai-audit-v1"
-    client_request_id: str
-    provider_request_id: str
-    response_id: str
-    requested_model: str
-    returned_model: str
-    status: str
-    input_tokens: int = Field(ge=0)
-    cached_input_tokens: int = Field(ge=0)
-    cache_write_input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
-    reasoning_tokens: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
-    cost_upper_bound_micros: int = Field(ge=0)
-    request_body_digest: str
-    output_digest: str
-    validated_result_digest: str | None = None
-    record_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    started_at: datetime
-    completed_at: datetime
-
-
-class ProviderResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    brief: EvidenceBrief
-    audit: ProviderAudit
-
-
-def provider_record_digest(brief: EvidenceBrief, audit: ProviderAudit) -> str:
-    audit_json = audit.model_dump(mode="json", exclude={"record_digest"})
-    return canonical_digest({"result": brief.model_dump(mode="json"), "audit": audit_json})
 
 
 class InferencePort(Protocol):

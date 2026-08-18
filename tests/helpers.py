@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
+from glupta_agi.contracts import (
+    EvidenceBrief,
+    ProviderAudit,
+    canonical_digest,
+    provider_record_digest,
+)
 from glupta_agi.inference import (
     DISCLOSURE_PROFILE,
     PINNED_MODEL,
@@ -52,6 +59,42 @@ def release_profile(**overrides: object) -> ReleaseProfile:
     }
     values.update(overrides)
     return ReleaseProfile.model_validate(values)
+
+
+def provider_audit(
+    brief: EvidenceBrief | dict[str, object],
+    *,
+    workflow_id: str,
+    request_digest: str,
+    **overrides: object,
+) -> ProviderAudit:
+    result = EvidenceBrief.model_validate(brief)
+    values: dict[str, object] = {
+        "workflow_id": workflow_id,
+        "request_digest": request_digest,
+        "release_profile_digest": release_profile().digest(),
+        "client_request_id": "client_1",
+        "provider_request_id": "req_1",
+        "response_id": "resp_1",
+        "requested_model": PINNED_MODEL,
+        "returned_model": PINNED_MODEL,
+        "status": "completed",
+        "input_tokens": 100,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 20,
+        "reasoning_tokens": 5,
+        "total_tokens": 120,
+        "cost_upper_bound_micros": 1_100,
+        "request_body_digest": "b" * 64,
+        "output_digest": "c" * 64,
+        "validated_result_digest": canonical_digest(result.model_dump(mode="json")),
+        "started_at": datetime.now(UTC),
+        "completed_at": datetime.now(UTC),
+    }
+    values.update(overrides)
+    audit = ProviderAudit.model_validate(values)
+    return audit.model_copy(update={"record_digest": provider_record_digest(result, audit)})
 
 
 def private_file(root: Path, name: str, value: str) -> Path:

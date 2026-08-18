@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DISCLOSURE_NOTICE = (
     "The selected source bytes and question will be sent to the OpenAI Responses API."
@@ -38,7 +40,76 @@ class EvidenceBrief(BaseModel):
     next_decisions: list[str]
 
 
+def canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class ProviderAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: str = "crawl-openai-audit-v1"
+    workflow_id: str
+    request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    release_profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    client_request_id: str
+    provider_request_id: str
+    response_id: str
+    requested_model: str
+    returned_model: str
+    status: str
+    input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(ge=0)
+    cache_write_input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    reasoning_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    cost_upper_bound_micros: int = Field(ge=0)
+    request_body_digest: str
+    output_digest: str
+    validated_result_digest: str | None = None
+    record_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    started_at: datetime
+    completed_at: datetime
+
+
+def provider_record_digest(brief: EvidenceBrief, audit: ProviderAudit) -> str:
+    audit_json = audit.model_dump(mode="json", exclude={"record_digest"})
+    return canonical_digest({"result": brief.model_dump(mode="json"), "audit": audit_json})
+
+
+class ProviderResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    brief: EvidenceBrief
+    audit: ProviderAudit
+
+
+def validate_provider_record(record: ProviderResult) -> ProviderResult:
+    result_digest = canonical_digest(record.brief.model_dump(mode="json"))
+    if (
+        record.audit.validated_result_digest != result_digest
+        or record.audit.record_digest != provider_record_digest(record.brief, record.audit)
+        or record.audit.total_tokens != record.audit.input_tokens + record.audit.output_tokens
+    ):
+        raise ValueError("provider result does not match its audit")
+    return record
+
+
 class EvidenceBriefResponse(EvidenceBrief):
-    request_digest: str
+    request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     workflow_id: str
     markdown: str
+    provider_audit: ProviderAudit
+
+    @model_validator(mode="after")
+    def bound_provider_record(self) -> EvidenceBriefResponse:
+        brief = EvidenceBrief(
+            answer=self.answer, citations=self.citations,
+            uncertainties=self.uncertainties, next_decisions=self.next_decisions,
+        )
+        record = validate_provider_record(ProviderResult(brief=brief, audit=self.provider_audit))
+        if (
+            record.audit.workflow_id != self.workflow_id
+            or record.audit.request_digest != self.request_digest
+        ):
+            raise ValueError("provider audit does not match the public result")
+        return self

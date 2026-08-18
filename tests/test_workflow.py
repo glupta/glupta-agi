@@ -1,34 +1,44 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import traceback
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from glupta_agi.client import _uuid7
-from glupta_agi.contracts import Citation, EvidenceBrief
-from glupta_agi.effects import AmbiguousEffectError, Effect
-from glupta_agi.inference import (
+from glupta_agi.contracts import (
+    Citation,
+    EvidenceBrief,
     ProviderAudit,
     ProviderResult,
     canonical_digest,
     provider_record_digest,
+)
+from glupta_agi.effects import AmbiguousEffectError, Effect
+from glupta_agi.inference import (
+    FrozenDispatch,
 )
 from glupta_agi.openai_adapter import ProviderAmbiguousError, ProviderRejectedError
 from glupta_agi.workflow import (
     BriefGenerationError,
     _crawl_agent,
     _crawl_durability,
+    _crawl_model,
     _CrawlModelPacket,
     _run_inference,
     crawl_observe_queue,
+    evidence_brief_workflow,
 )
 from tests.helpers import release_profile
+
+_WORKFLOW_ID = "0198be50-0000-7000-8000-000000000000"
 
 
 def _packet(
@@ -43,13 +53,16 @@ def _packet(
         release_profile=release_profile(),
         credential_file="/private/api-key",
         admitted_at=admitted_at or datetime.now(UTC),
-        workflow_id=workflow_id or _uuid7(),
+        workflow_id=workflow_id or _WORKFLOW_ID,
         request_digest="a" * 64,
     )
 
 
 def _audit(**overrides: object) -> ProviderAudit:
     values: dict[str, object] = {
+        "workflow_id": _WORKFLOW_ID,
+        "request_digest": "a" * 64,
+        "release_profile_digest": release_profile().digest(),
         "client_request_id": "0198be50-0000-7000-8000-000000000000",
         "provider_request_id": "req_1",
         "response_id": "resp_1",
@@ -125,7 +138,7 @@ class FakeAdapter:
         pass
 
     async def generate(
-        self, dispatch: object, request_body: dict[str, object]
+        self, dispatch: FrozenDispatch, request_body: dict[str, object]
     ) -> ProviderResult:
         type(self).request_body = request_body
         type(self).dispatch = dispatch
@@ -137,7 +150,10 @@ class FakeAdapter:
                 next_decisions=[],
             ),
             audit=_audit(
-                request_body_digest=request_body["model"] and dispatch.request_body_digest
+                workflow_id=dispatch.workflow_id,
+                request_digest=dispatch.request_digest,
+                release_profile_digest=dispatch.release_profile_digest,
+                request_body_digest=request_body["model"] and dispatch.request_body_digest,
             ),
         )
 
@@ -159,9 +175,9 @@ class WorkflowTests(unittest.TestCase):
             patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
             patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
         ):
-            brief, usage = _run(_packet(), adapter_factory=FakeAdapter)
+            result, usage = _run(_packet(), adapter_factory=FakeAdapter)
 
-        self.assertEqual(brief.citations[0].quote, "grounded fact")
+        self.assertEqual(result.brief.citations[0].quote, "grounded fact")
         self.assertEqual(usage.input_tokens, 100)
         self.assertEqual(usage.details["reasoning_output_tokens"], 5)
         body = FakeAdapter.request_body
@@ -173,8 +189,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(body["store"])
         self.assertFalse(body["stream"])
         self.assertEqual(
-            [call.args[2] for call in transition.call_args_list],
-            ["dispatching", "returned", "reconciled"],
+            [call.args[2] for call in transition.call_args_list], ["dispatching", "reconciled"],
         )
         returned = transition.call_args_list[1]
         self.assertEqual(
@@ -199,11 +214,45 @@ class WorkflowTests(unittest.TestCase):
                 audit=_recorded_audit(recorded).model_dump(mode="json"),
             ),
         ):
-            brief, usage = _run(_packet(), adapter_factory=factory)
-        self.assertEqual(brief.answer, "Grounded.")
+            result, usage = _run(_packet(), adapter_factory=factory)
+        self.assertEqual(result.brief.answer, "Grounded.")
         self.assertEqual(usage.output_tokens, 20)
         self.assertEqual(usage.details["cost_upper_bound_micros"], 1_100)
         factory.assert_not_called()
+
+    def test_initial_and_replay_public_results_return_identical_bound_audit(self) -> None:
+        brief = EvidenceBrief(
+            answer="Grounded.",
+            citations=[Citation(path="source.md", line_start=1, line_end=1, quote="grounded fact")],
+            uncertainties=[],
+            next_decisions=[],
+        )
+        provider_result = ProviderResult(
+            brief=brief, audit=_recorded_audit(brief.model_dump(mode="json"))
+        )
+        payload = {
+            "question": "question",
+            "sources": [{"path": "source.md", "content": "grounded fact"}],
+            "request_digest": "a" * 64,
+        }
+        with patch.object(
+            _crawl_agent, "run", new=AsyncMock(return_value=SimpleNamespace(output=provider_result))
+        ):
+            responses = [
+                asyncio.run(
+                    inspect.unwrap(evidence_brief_workflow)(
+                        payload,
+                        _WORKFLOW_ID,
+                        release_profile().model_dump(mode="json"),
+                        "/private/key",
+                        datetime.now(UTC).isoformat(),
+                    )
+                )
+                for _ in range(2)
+            ]
+        self.assertEqual(responses[0], responses[1])
+        self.assertEqual(responses[0]["provider_audit"]["provider_request_id"], "req_1")
+        self.assertEqual(responses[0]["provider_audit"]["cost_upper_bound_micros"], 1_100)
 
     def test_replay_rejects_result_or_audit_digest_tampering_without_adapter(self) -> None:
         recorded = EvidenceBrief(
@@ -252,16 +301,95 @@ class WorkflowTests(unittest.TestCase):
 
     def test_ambiguous_recovery_never_redispatches(self) -> None:
         factory = Mock()
-        with (
-            patch("glupta_agi.workflow.reserve", side_effect=_reserve("dispatching")),
-            patch(
-                "glupta_agi.workflow.hold_unknown",
-                side_effect=AmbiguousEffectError("manual reconciliation required"),
-            ),
-            self.assertRaises(AmbiguousEffectError),
-        ):
-            _run(_packet(), adapter_factory=factory)
+        for state in ("dispatching", "returned", "unknown"):
+            with (
+                self.subTest(state=state),
+                patch("glupta_agi.workflow.reserve", side_effect=_reserve(state)),
+                patch(
+                    "glupta_agi.workflow.hold_unknown",
+                    side_effect=AmbiguousEffectError("manual reconciliation required"),
+                ),
+                self.assertRaises(AmbiguousEffectError),
+            ):
+                _run(_packet(), adapter_factory=factory)
         factory.assert_not_called()
+
+    def test_persistence_fault_boundaries_never_redispatch(self) -> None:
+        def scenario(fault: str) -> None:
+            store: dict[str, object] = {"state": "reserved", "calls": 0, "fault": fault}
+
+            class CountingAdapter(FakeAdapter):
+                async def generate(
+                    self, dispatch: FrozenDispatch, request_body: dict[str, object]
+                ) -> ProviderResult:
+                    store["calls"] = int(store["calls"]) + 1
+                    return await super().generate(dispatch, request_body)
+
+            def reserve_effect(dispatch: dict[str, object], digest: str) -> Effect:
+                result = store.get("result")
+                audit = store.get("audit")
+                return Effect(
+                    workflow_id=str(dispatch["workflow_id"]),
+                    request_digest=str(dispatch["request_digest"]),
+                    dispatch_digest=digest,
+                    state=str(store["state"]),
+                    dispatch=dispatch,
+                    result=result if isinstance(result, dict) else None,
+                    audit=audit if isinstance(audit, dict) else None,
+                )
+
+            def persist(
+                workflow_id: str, expected: str, state: str, **kwargs: object
+            ) -> Effect:
+                self.assertEqual(store["state"], expected)
+                if expected == "dispatching" and store["fault"]:
+                    if str(store["fault"]).startswith("after_"):
+                        store.update(
+                            state=state, result=kwargs["result"], audit=kwargs["audit"]
+                        )
+                        if store["fault"] == "after_tampered_commit":
+                            store["audit"] = {**store["audit"], "response_id": "tampered"}
+                    store["fault"] = None
+                    raise RuntimeError("ambiguous commit acknowledgement")
+                store.update(
+                    state=state, result=kwargs.get("result"), audit=kwargs.get("audit")
+                )
+                return reserve_effect(
+                    {"workflow_id": workflow_id, "request_digest": "a" * 64}, "e" * 64
+                )
+
+            def hold(_workflow_id: str, _reason: str, **_kwargs: object) -> None:
+                store["state"] = "unknown"
+                raise AmbiguousEffectError("manual reconciliation required")
+
+            with (
+                patch("glupta_agi.workflow.reserve", side_effect=reserve_effect),
+                patch("glupta_agi.workflow.transition", side_effect=persist),
+                patch("glupta_agi.workflow.hold_unknown", side_effect=hold),
+            ):
+                if fault != "after_commit":
+                    with self.assertRaises(AmbiguousEffectError):
+                        _run(_packet(), adapter_factory=CountingAdapter)
+                    with self.assertRaises(AmbiguousEffectError):
+                        _run(_packet(), adapter_factory=CountingAdapter)
+                else:
+                    first, _ = _run(_packet(), adapter_factory=CountingAdapter)
+                    second, _ = _run(_packet(), adapter_factory=CountingAdapter)
+                    self.assertEqual(first, second)
+            self.assertEqual(store["calls"], 1)
+
+        for fault in ("before_commit", "after_commit", "after_tampered_commit"):
+            with self.subTest(fault=fault):
+                scenario(fault)
+
+    def test_ambiguous_model_step_returns_checkpointable_unknown_sentinel(self) -> None:
+        message = ModelRequest(parts=[UserPromptPart(_packet().model_dump_json())])
+        with patch(
+            "glupta_agi.workflow._run_inference",
+            side_effect=AmbiguousEffectError("manual reconciliation required"),
+        ):
+            response = asyncio.run(_crawl_model([message], Mock()))
+        self.assertEqual(response.parts[0].content, '"unknown"')
 
     def test_expired_queue_and_oversized_prompt_reject_before_adapter(self) -> None:
         factory = Mock()
@@ -308,7 +436,7 @@ class WorkflowTests(unittest.TestCase):
             ) -> ProviderResult:
                 raise ProviderAmbiguousError(sentinel)
 
-        def hold(_effect: Effect, reason: str) -> None:
+        def hold(_workflow_id: str, reason: str, **_kwargs: object) -> None:
             self.assertEqual(reason, "provider_outcome_ambiguous")
             raise AmbiguousEffectError("manual reconciliation required") from None
 
