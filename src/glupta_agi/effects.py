@@ -9,7 +9,8 @@ from typing import Any
 import sqlalchemy as sa
 from dbos import SQLAlchemyDatasource
 
-from .inference import FrozenDispatch
+from .contracts import EvidenceBrief
+from .inference import FrozenDispatch, ProviderAudit, canonical_digest, provider_record_digest
 
 
 class AmbiguousEffectError(RuntimeError):
@@ -143,14 +144,36 @@ def _effect(row: dict[str, Any]) -> Effect:
         or int(row.get("max_usd_micros", 0)) != frozen.max_usd_micros
     ):
         raise RuntimeError("external effect row violates the frozen budget")
+    result = _json(row.get("result_json"))
+    audit = _json(row.get("audit_json"))
+    if str(row.get("state")) in {"returned", "reconciled"}:
+        try:
+            brief = EvidenceBrief.model_validate(result)
+            provider_audit = ProviderAudit.model_validate(audit)
+        except ValueError:
+            raise RuntimeError("external effect row lacks a valid result binding") from None
+        result_digest = canonical_digest(brief.model_dump(mode="json"))
+        invalid = (
+            provider_audit.validated_result_digest != result_digest,
+            provider_audit.request_body_digest != frozen.request_body_digest,
+            provider_audit.requested_model != frozen.model,
+            provider_audit.returned_model != frozen.model,
+            provider_audit.status != "completed",
+            provider_audit.total_tokens
+            != provider_audit.input_tokens + provider_audit.output_tokens,
+            provider_audit.cost_upper_bound_micros > frozen.max_usd_micros,
+            provider_audit.record_digest != provider_record_digest(brief, provider_audit),
+        )
+        if any(invalid):
+            raise RuntimeError("external effect result and audit do not match")
     return Effect(
         workflow_id=str(row["workflow_id"]),
         request_digest=str(row["request_digest"]),
         dispatch_digest=str(row["dispatch_digest"]),
         state=str(row["state"]),
         dispatch=frozen.model_dump(mode="json"),
-        result=_json(row.get("result_json")),
-        audit=_json(row.get("audit_json")),
+        result=result,
+        audit=audit,
     )
 
 
@@ -244,4 +267,4 @@ def transition(
 def hold_unknown(effect: Effect, reason: str) -> None:
     if effect.state != "unknown":
         transition(effect.workflow_id, effect.state, "unknown", hold_reason=reason)
-    raise AmbiguousEffectError("model effect outcome is ambiguous; manual reconciliation required")
+    raise AmbiguousEffectError("model effect outcome is ambiguous; manual reconciliation required") from None  # noqa: E501

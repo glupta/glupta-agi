@@ -17,12 +17,13 @@ from pydantic_ai.usage import RequestUsage
 
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
 from .contracts import EvidenceBrief
-from .effects import AmbiguousEffectError, hold_unknown, reserve, transition
+from .effects import hold_unknown, reserve, transition
 from .inference import (
     FrozenDispatch,
     ProviderAudit,
     ReleaseProfile,
     canonical_digest,
+    provider_record_digest,
     usd_upper_bound,
 )
 from .openai_adapter import (
@@ -51,6 +52,7 @@ class _CrawlModelPacket(BaseModel):
 
 
 def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
+    schema = EvidenceBrief.model_json_schema()
     return {
         "model": profile.model,
         "instructions": SYSTEM_PROMPT,
@@ -60,7 +62,7 @@ def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
             "format": {
                 "type": "json_schema",
                 "name": "crawl_evidence_brief",
-                "schema": EvidenceBrief.model_json_schema(),
+                "schema": schema,
                 "strict": True,
             }
         },
@@ -76,40 +78,36 @@ def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
 
 def _dispatch(packet: _CrawlModelPacket, request_body: dict[str, Any]) -> FrozenDispatch:
     now = datetime.now(UTC)
-    if not packet.release_profile.current_at(now):
+    profile = packet.release_profile
+    if not profile.current_at(now):
         raise BriefGenerationError("release profile evidence is expired")
     if packet.admitted_at.tzinfo is None or packet.admitted_at > now + timedelta(seconds=5):
         raise BriefGenerationError("admission timestamp is invalid")
-    input_bound = (
-        len(
-            json.dumps(
-                request_body, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-            ).encode()
-        )
-        + _REQUEST_OVERHEAD_BYTES
-    )
-    if input_bound > packet.release_profile.max_input_tokens:
+    encoded = json.dumps(
+        request_body, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode()
+    input_bound = len(encoded) + _REQUEST_OVERHEAD_BYTES
+    if input_bound > profile.max_input_tokens:
         raise BriefGenerationError("model request exceeds the input-token ceiling")
-    if usd_upper_bound(input_bound, packet.release_profile.max_output_tokens) > (
-        packet.release_profile.max_usd_micros
-    ):
+    cost_bound = usd_upper_bound(input_bound, profile.max_output_tokens)
+    if cost_bound > profile.max_usd_micros:
         raise BriefGenerationError("model request exceeds the USD ceiling")
     queue_deadline = packet.admitted_at.astimezone(UTC) + timedelta(
-        seconds=packet.release_profile.queue_timeout_seconds
+        seconds=profile.queue_timeout_seconds
     )
     return FrozenDispatch(
         workflow_id=packet.workflow_id,
         request_digest=packet.request_digest,
         request_body_digest=canonical_digest(request_body),
-        release_profile_digest=packet.release_profile.digest(),
-        model=packet.release_profile.model,
+        release_profile_digest=profile.digest(),
+        model=profile.model,
         input_token_upper_bound=input_bound,
-        max_output_tokens=packet.release_profile.max_output_tokens,
-        max_usd_micros=packet.release_profile.max_usd_micros,
+        max_output_tokens=profile.max_output_tokens,
+        max_usd_micros=profile.max_usd_micros,
         queue_deadline=queue_deadline,
         wall_deadline=packet.admitted_at.astimezone(UTC)
-        + timedelta(seconds=packet.release_profile.wall_timeout_seconds),
-        wall_timeout_seconds=packet.release_profile.wall_timeout_seconds,
+        + timedelta(seconds=profile.wall_timeout_seconds),
+        wall_timeout_seconds=profile.wall_timeout_seconds,
     )
 
 
@@ -126,10 +124,8 @@ def _usage(audit: ProviderAudit) -> RequestUsage:
     )
 
 
-def _run_inference(
-    packet: _CrawlModelPacket,
-    *,
-    adapter_factory: Any = OpenAIResponsesAdapter,
+async def _run_inference(
+    packet: _CrawlModelPacket, *, adapter_factory: Any = OpenAIResponsesAdapter
 ) -> tuple[EvidenceBrief, RequestUsage]:
     request_body = _request_body(packet.prompt, packet.release_profile)
     dispatch = _dispatch(packet, request_body)
@@ -139,8 +135,16 @@ def _run_inference(
         if effect.result is None or effect.audit is None:
             raise BriefGenerationError("recorded model effect lacks result or usage audit")
         try:
-            brief = resolve_citations(EvidenceBrief.model_validate(effect.result), packet.sources)
             audit = ProviderAudit.model_validate(effect.audit)
+            brief = EvidenceBrief.model_validate(effect.result)
+            result_digest = canonical_digest(brief.model_dump(mode="json"))
+            invalid = (
+                audit.validated_result_digest != result_digest,
+                audit.record_digest != provider_record_digest(brief, audit),
+                resolve_citations(brief, packet.sources) != brief,
+            )
+            if any(invalid):
+                raise ValueError
         except ValueError:
             raise BriefGenerationError("recorded model effect failed validation") from None
         if effect.state == "returned":
@@ -160,57 +164,39 @@ def _run_inference(
     adapter = adapter_factory(packet.release_profile, Path(packet.credential_file))
     effect = transition(packet.workflow_id, "reserved", "dispatching")
     try:
-        provider_result = adapter.generate(dispatch, request_body)
+        provider_result = await adapter.generate(dispatch, request_body)
     except ProviderRejectedError as exc:
-        transition(
-            packet.workflow_id,
-            "dispatching",
-            "failed",
-            audit=None if exc.audit is None else exc.audit.model_dump(mode="json"),
-            hold_reason="provider_rejected",
-        )
+        rejected_audit = None if exc.audit is None else exc.audit.model_dump(mode="json")
+        transition(packet.workflow_id, "dispatching", "failed", audit=rejected_audit,
+                   hold_reason="provider_rejected")
         raise BriefGenerationError("provider response was rejected") from None
     except (ProviderAmbiguousError, AdapterError):
-        try:
-            hold_unknown(effect, "provider_outcome_ambiguous")
-        except AmbiguousEffectError as exc:
-            raise exc from None
+        hold_unknown(effect, "provider_outcome_ambiguous")
     try:
         brief = resolve_citations(provider_result.brief, packet.sources)
     except ValueError:
-        transition(
-            packet.workflow_id,
-            "dispatching",
-            "failed",
-            audit=provider_result.audit.model_dump(mode="json"),
-            hold_reason="invalid_citation",
-        )
+        rejected_audit = provider_result.audit.model_dump(mode="json")
+        transition(packet.workflow_id, "dispatching", "failed", audit=rejected_audit,
+                   hold_reason="invalid_citation")
         raise BriefGenerationError("provider output failed citation validation") from None
-    effect = transition(
-        packet.workflow_id,
-        "dispatching",
-        "returned",
-        result=brief.model_dump(mode="json"),
-        audit=provider_result.audit.model_dump(mode="json"),
-    )
+    result = brief.model_dump(mode="json")
+    digest = canonical_digest(result)
+    audit = provider_result.audit.model_copy(update={"validated_result_digest": digest})
+    audit = audit.model_copy(update={"record_digest": provider_record_digest(brief, audit)})
+    audit_json = audit.model_dump(mode="json")
+    transition(packet.workflow_id, "dispatching", "returned", result=result, audit=audit_json)
     transition(packet.workflow_id, "returned", "reconciled")
-    return brief, _usage(provider_result.audit)
+    return brief, _usage(audit)
 
 
-def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+async def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     del info
-    raw_packet = next(
-        (
-            part.content
-            for message in reversed(messages)
-            for part in reversed(message.parts)
-            if isinstance(part, UserPromptPart) and isinstance(part.content, str)
-        ),
-        None,
-    )
+    parts = (part for message in reversed(messages) for part in reversed(message.parts))
+    contents = (part.content for part in parts if isinstance(part, UserPromptPart))
+    raw_packet = next((content for content in contents if isinstance(content, str)), None)
     if raw_packet is None:
         raise BriefGenerationError("Crawl model packet is missing")
-    brief, usage = _run_inference(_CrawlModelPacket.model_validate_json(raw_packet))
+    brief, usage = await _run_inference(_CrawlModelPacket.model_validate_json(raw_packet))
     return ModelResponse(parts=[TextPart(brief.model_dump_json())], usage=usage)
 
 

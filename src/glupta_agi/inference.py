@@ -163,6 +163,7 @@ class ProviderAudit(BaseModel):
     request_body_digest: str
     output_digest: str
     validated_result_digest: str | None = None
+    record_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     started_at: datetime
     completed_at: datetime
 
@@ -173,10 +174,13 @@ class ProviderResult(BaseModel):
     audit: ProviderAudit
 
 
+def provider_record_digest(brief: EvidenceBrief, audit: ProviderAudit) -> str:
+    audit_json = audit.model_dump(mode="json", exclude={"record_digest"})
+    return canonical_digest({"result": brief.model_dump(mode="json"), "audit": audit_json})
+
+
 class InferencePort(Protocol):
-    def generate(
-        self, dispatch: FrozenDispatch, request_body: dict[str, Any]
-    ) -> ProviderResult: ...
+    async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> ProviderResult: ...  # noqa: E501
 
 
 def usd_upper_bound(input_tokens: int, output_tokens: int) -> int:

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
+import time
+import traceback
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
 
 import pytest
+from httpx import Request, Response
+from openai import APIStatusError
 
 from glupta_agi.inference import FrozenDispatch, canonical_digest
 from glupta_agi.openai_adapter import (
@@ -81,12 +87,18 @@ class FakeClient:
         self.request: dict[str, object] | None = None
         self.closed = False
 
-    def create(self, **kwargs: object) -> object:
+    async def create(self, **kwargs: object) -> object:
         self.request = kwargs
+        if isinstance(self.response, Exception):
+            raise self.response
         return self.response
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
+
+
+def _generate(adapter: OpenAIResponsesAdapter, body: dict[str, object], **overrides: object):
+    return asyncio.run(adapter.generate(_dispatch(body, **overrides), body))
 
 
 def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None:
@@ -101,7 +113,7 @@ def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None
     with tempfile.TemporaryDirectory() as temporary:
         key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(release_profile(), key, client_factory=factory)
-        result = adapter.generate(_dispatch(body), body)
+        result = _generate(adapter, body)
 
     case = TestCase()
     case.assertEqual(result.brief.answer, "Grounded.")
@@ -151,7 +163,7 @@ def test_missing_inconsistent_or_over_budget_usage_is_ambiguous(response: object
             release_profile(), key, client_factory=lambda **_kwargs: FakeClient(response)
         )
         with pytest.raises(ProviderAmbiguousError):
-            adapter.generate(_dispatch(body), body)
+            _generate(adapter, body)
 
 
 def test_model_or_schema_rejection_is_definitive_and_audited() -> None:
@@ -169,8 +181,64 @@ def test_model_or_schema_rejection_is_definitive_and_audited() -> None:
                 client_factory=lambda _response=response, **_kwargs: FakeClient(_response),
             )
             with pytest.raises(ProviderRejectedError) as caught:
-                adapter.generate(_dispatch(body), body)
+                _generate(adapter, body)
             TestCase().assertIsNotNone(caught.value.audit)
+
+
+@pytest.mark.parametrize("status", [400, 429, 500])
+def test_authenticated_status_error_is_definitive_and_sanitized(status: int) -> None:
+    body = _body()
+    request = Request("POST", "https://api.openai.com/v1/responses")
+    response = Response(status, request=request, headers={"x-request-id": "req_rejected"})
+    error = APIStatusError("RAW_PROVIDER_BODY", response=response, body={"secret": "marker"})
+    client = FakeClient(error)
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, client_factory=lambda **_kwargs: client
+        )
+        with pytest.raises(ProviderRejectedError) as caught:
+            _generate(adapter, body)
+    case = TestCase()
+    case.assertEqual(str(caught.value), "OpenAI request was rejected")
+    case.assertIsNone(caught.value.audit)
+    case.assertIsNone(caught.value.__cause__)
+    case.assertNotIn("RAW_PROVIDER_BODY", "".join(traceback.format_exception(caught.value)))
+    case.assertTrue(client.closed)
+
+
+def test_absolute_wall_deadline_cancels_transport_and_closes_client() -> None:
+    body = _body()
+
+    class SlowClient(FakeClient):
+        close_started = False
+        close_finished = False
+
+        async def create(self, **kwargs: object) -> object:
+            self.request = kwargs
+            await asyncio.sleep(10)
+            return self.response
+
+        async def close(self) -> None:
+            self.close_started = True
+            await asyncio.sleep(10)
+            self.close_finished = True
+
+    client = SlowClient(_response())
+    deadline = (datetime.now(UTC) + timedelta(milliseconds=20)).isoformat()
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(
+            release_profile(), key, client_factory=lambda **_kwargs: client
+        )
+        started = time.monotonic()
+        with pytest.raises(ProviderAmbiguousError):
+            _generate(adapter, body, queue_deadline=deadline, wall_deadline=deadline)
+        elapsed = time.monotonic() - started
+    case = TestCase()
+    case.assertLess(elapsed, 0.2)
+    case.assertTrue(client.close_started)
+    case.assertFalse(client.close_finished)
 
 
 def test_profile_request_and_credential_drift_reject_without_transport() -> None:
@@ -184,18 +252,20 @@ def test_profile_request_and_credential_drift_reject_without_transport() -> None
         key = private_file(root, "api-key", "secret-api-key-" + "x" * 32)
         adapter = OpenAIResponsesAdapter(release_profile(), key, client_factory=factory)
         with pytest.raises(AdapterError):
-            adapter.generate(_dispatch(body, release_profile_digest="f" * 64), body)
+            _generate(adapter, body, release_profile_digest="f" * 64)
         with pytest.raises(AdapterError):
-            adapter.generate(_dispatch(body), {**body, "store": True})
+            asyncio.run(adapter.generate(_dispatch(body), {**body, "store": True}))
         key.chmod(0o640)
         with pytest.raises(AdapterError):
-            adapter.generate(_dispatch(body), body)
+            _generate(adapter, body)
 
         expired = release_profile(
             credential_expires_at="2020-01-01T00:00:00Z",
             evidence_expires_at="2020-01-01T00:00:00Z",
         )
         with pytest.raises(AdapterError, match="expired"):
-            OpenAIResponsesAdapter(expired, key, client_factory=factory).generate(
-                _dispatch(body, release_profile_digest=expired.digest()), body
+            asyncio.run(
+                OpenAIResponsesAdapter(expired, key, client_factory=factory).generate(
+                    _dispatch(body, release_profile_digest=expired.digest()), body
+                )
             )

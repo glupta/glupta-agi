@@ -13,6 +13,14 @@ Preserve these constraints:
   queues, schedules, replay, retries, and application versions.
 - Prefer maintained third-party primitives. Custom code is limited to irreducible
   product, privacy, budget, authority, and promotion policy.
+- Before adding or changing any component, dependency, service, adapter, or
+  control primitive anywhere in the Glupta stack, record a current
+  build-versus-adopt check against official/native capabilities and relevant
+  maintained open-source alternatives, including lightweight generic
+  frameworks. Genericity is not a disqualifier: adopt the maintained primitive
+  when it satisfies the frozen contract and materially removes custom code or
+  operational burden. Any custom layer must name the exact missing contract and
+  prove it with regression tests.
 - Progress by measured stages. Crawl is one useful source-grounded read-only
   `OBSERVE` task at or below 1,500 production lines. Do not activate DIRECT,
   COMPOUND, or EXECUTE before the next stage is earned and explicitly approved.

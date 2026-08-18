@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 import uuid
@@ -10,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from openai import DefaultHttpxClient, OpenAI
+from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 
 from .contracts import EvidenceBrief
 from .inference import (
@@ -19,8 +20,13 @@ from .inference import (
     ProviderResult,
     ReleaseProfile,
     canonical_digest,
+    provider_record_digest,
     usd_upper_bound,
 )
+
+_USAGE_FIELDS = set("input_tokens input_tokens_details output_tokens output_tokens_details total_tokens".split())  # noqa: E501
+_INPUT_DETAIL_FIELDS = set("cached_tokens cache_write_tokens".split())
+_OUTPUT_DETAIL_FIELDS = {"reasoning_tokens"}
 
 
 class AdapterError(RuntimeError):
@@ -75,13 +81,13 @@ class OpenAIResponsesAdapter:
         profile: ReleaseProfile,
         credential_file: Path,
         *,
-        client_factory: Callable[..., Any] = OpenAI,
+        client_factory: Callable[..., Any] = AsyncOpenAI,
     ) -> None:
         self.profile = profile
         self.credential_file = credential_file
         self.client_factory = client_factory
 
-    def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> ProviderResult:
+    async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> ProviderResult:  # noqa: E501
         if not self.profile.current_at():
             raise AdapterError("release profile evidence is expired")
         if dispatch.release_profile_digest != self.profile.digest():
@@ -95,18 +101,21 @@ class OpenAIResponsesAdapter:
         if remaining_seconds <= 0:
             raise AdapterError("model request exceeded the wall deadline")
         client = None
+        loop = asyncio.get_running_loop()
+        monotonic_deadline = loop.time() + remaining_seconds
         try:
+            http_client = DefaultAsyncHttpxClient(trust_env=False, follow_redirects=False)
             client = self.client_factory(
-                api_key=key,
-                base_url=self.profile.endpoint,
-                max_retries=0,
+                api_key=key, base_url=self.profile.endpoint, max_retries=0,
                 timeout=min(float(dispatch.wall_timeout_seconds), remaining_seconds),
-                http_client=DefaultHttpxClient(trust_env=False, follow_redirects=False),
+                http_client=http_client,
             )
-            response = client.responses.create(
-                **request_body,
-                extra_headers={"X-Client-Request-Id": client_request_id},
-            )
+            async with asyncio.timeout_at(monotonic_deadline):
+                headers = {"X-Client-Request-Id": client_request_id}
+                response = await client.responses.create(**request_body, extra_headers=headers)
+        except APIStatusError as exc:
+            del exc
+            raise ProviderRejectedError("OpenAI request was rejected") from None
         except Exception as exc:
             raise ProviderAmbiguousError("OpenAI request outcome is ambiguous") from exc
         finally:
@@ -114,7 +123,8 @@ class OpenAIResponsesAdapter:
                 close = getattr(client, "close", None)
                 if callable(close):
                     try:
-                        close()
+                        async with asyncio.timeout_at(monotonic_deadline):
+                            await close()
                     except Exception:  # noqa: S110 -- cleanup cannot change request outcome
                         pass
         completed = datetime.now(UTC)
@@ -128,48 +138,33 @@ class OpenAIResponsesAdapter:
         if usage is None:
             raise ProviderAmbiguousError("OpenAI response lacks usage")
         try:
-            if _field_names(usage) != {
-                "input_tokens",
-                "input_tokens_details",
-                "output_tokens",
-                "output_tokens_details",
-                "total_tokens",
-            } or _field_names(usage.input_tokens_details) != {
-                "cached_tokens",
-                "cache_write_tokens",
-            } or _field_names(usage.output_tokens_details) != {"reasoning_tokens"}:
+            invalid_fields = (
+                _field_names(usage) != _USAGE_FIELDS
+                or _field_names(usage.input_tokens_details) != _INPUT_DETAIL_FIELDS
+                or _field_names(usage.output_tokens_details) != _OUTPUT_DETAIL_FIELDS
+            )
+            if invalid_fields:
                 raise ValueError
             input_tokens = int(usage.input_tokens)
             output_tokens = int(usage.output_tokens)
             total_tokens = int(usage.total_tokens)
-            cached_tokens = int(getattr(usage.input_tokens_details, "cached_tokens", 0) or 0)
-            cache_write_tokens = int(
-                getattr(usage.input_tokens_details, "cache_write_tokens", 0) or 0
-            )
+            input_details = usage.input_tokens_details
+            cached_tokens = int(getattr(input_details, "cached_tokens", 0) or 0)
+            cache_write_tokens = int(getattr(input_details, "cache_write_tokens", 0) or 0)
             reasoning_tokens = int(getattr(usage.output_tokens_details, "reasoning_tokens", 0) or 0)
         except (AttributeError, TypeError, ValueError) as exc:
             raise ProviderAmbiguousError("OpenAI usage is invalid") from exc
-        if min(
-            input_tokens,
-            output_tokens,
-            total_tokens,
-            cached_tokens,
-            cache_write_tokens,
-            reasoning_tokens,
-        ) < 0:
+        token_counts = (input_tokens, output_tokens, total_tokens, cached_tokens,
+                        cache_write_tokens, reasoning_tokens)
+        if min(token_counts) < 0:
             raise ProviderAmbiguousError("OpenAI usage is invalid")
-        if (
-            total_tokens != input_tokens + output_tokens
-            or cached_tokens + cache_write_tokens > input_tokens
-        ):
+        if total_tokens != input_tokens + output_tokens or cached_tokens + cache_write_tokens > input_tokens:  # noqa: E501
             raise ProviderAmbiguousError("OpenAI usage is inconsistent")
         cost = usd_upper_bound(input_tokens, output_tokens)
-        if (
-            input_tokens > dispatch.input_token_upper_bound
-            or output_tokens > dispatch.max_output_tokens
-            or reasoning_tokens > self.profile.max_reasoning_tokens
-            or cost > dispatch.max_usd_micros
-        ):
+        observed = (input_tokens, output_tokens, reasoning_tokens, cost)
+        limits = (dispatch.input_token_upper_bound, dispatch.max_output_tokens,
+                  self.profile.max_reasoning_tokens, dispatch.max_usd_micros)
+        if any(value > limit for value, limit in zip(observed, limits, strict=True)):
             raise ProviderAmbiguousError("OpenAI usage exceeds the reserved budget")
         output_text = str(getattr(response, "output_text", "") or "")
         audit = ProviderAudit(
@@ -201,7 +196,7 @@ class OpenAIResponsesAdapter:
             brief = EvidenceBrief.model_validate_json(output_text)
         except ValueError as exc:
             raise ProviderRejectedError("OpenAI output failed the response schema", audit) from exc
-        audit = audit.model_copy(
-            update={"validated_result_digest": canonical_digest(brief.model_dump(mode="json"))}
-        )
+        result_digest = canonical_digest(brief.model_dump(mode="json"))
+        audit = audit.model_copy(update={"validated_result_digest": result_digest})
+        audit = audit.model_copy(update={"record_digest": provider_record_digest(brief, audit)})
         return ProviderResult(brief=brief, audit=audit)
