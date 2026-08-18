@@ -625,6 +625,77 @@ class WorkflowTests(unittest.TestCase):
             "RAW_PROVIDER_MARKER", "".join(traceback.format_exception(caught.exception))
         )
 
+    def test_external_transport_cancellation_is_sticky_unknown_without_redispatch(self) -> None:
+        state = {"value": "reserved", "dispatch": None, "digest": None}
+        clients: list[object] = []
+
+        class CancelledClient:
+            def __init__(self) -> None:
+                self.responses = self
+                self.started = asyncio.Event()
+                self.closed = False
+
+            async def create(self, **_kwargs: object) -> None:
+                self.started.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                self.closed = True
+
+        def effect(dispatch: dict[str, object], digest: str) -> Effect:
+            state.update(dispatch=dispatch, digest=digest)
+            return Effect(workflow_id=str(dispatch["workflow_id"]),
+                request_digest=str(dispatch["request_digest"]), dispatch_digest=digest,
+                state=str(state["value"]), dispatch=dispatch, result=None, audit=None)
+
+        def reserve_effect(dispatch: dict[str, object], digest: str) -> Effect:
+            return effect(dispatch, digest)
+
+        def transition_effect(_workflow_id: str, _expected: str, target: str,
+                              **_kwargs: object) -> Effect:
+            state["value"] = target
+            return effect(state["dispatch"], state["digest"])
+
+        def hold(_workflow_id: str, reason: str, **_kwargs: object) -> None:
+            self.assertIn(reason, {"provider_outcome_ambiguous", "recovery_from_unknown"})
+            state["value"] = "unknown"
+            raise AmbiguousEffectError("manual reconciliation required") from None
+
+        def factory(profile: object, credential_file: Path, *,
+                    credential_generation: int) -> OpenAIResponsesAdapter:
+            client = CancelledClient()
+            clients.append(client)
+            return OpenAIResponsesAdapter(profile, credential_file,
+                credential_generation=credential_generation,
+                client_factory=lambda **_kwargs: client)
+
+        async def exercise(packet: _CrawlModelPacket) -> tuple[Exception, Exception]:
+            first_task = asyncio.create_task(_run_inference(packet, adapter_factory=factory))
+            while not clients:
+                await asyncio.sleep(0)
+            await clients[0].started.wait()
+            first_task.cancel()
+            with self.assertRaises(AmbiguousEffectError) as first:
+                await first_task
+            with self.assertRaises(AmbiguousEffectError) as second:
+                await _run_inference(packet, adapter_factory=factory)
+            return first.exception, second.exception
+
+        with tempfile.TemporaryDirectory() as temporary:
+            key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+            packet = _packet(credential_file=str(key), source_content="RAW_SOURCE_BYTES")
+            with (
+                patch("glupta_agi.workflow.reserve", side_effect=reserve_effect),
+                patch("glupta_agi.workflow.transition", side_effect=transition_effect),
+                patch("glupta_agi.workflow.hold_unknown", side_effect=hold),
+            ):
+                first, second = asyncio.run(exercise(packet))
+        self.assertEqual(len(clients), 1)
+        self.assertTrue(clients[0].closed)
+        self.assertEqual(state["value"], "unknown")
+        _assert_product_frames_sanitized(first, "RAW_SOURCE_BYTES", "secret-api-key-")
+        _assert_product_frames_sanitized(second, "RAW_SOURCE_BYTES", "secret-api-key-")
+
     def test_definitive_rejection_is_failed_without_retry(self) -> None:
         class RejectingAdapter(FakeAdapter):
             async def generate(self, _dispatch: object, _body: dict[str, object]) -> ProviderResult:

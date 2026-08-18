@@ -519,6 +519,43 @@ def test_absolute_wall_deadline_cancels_transport_and_closes_client() -> None:
     case.assertFalse(client.close_finished)
 
 
+def test_external_cancellation_after_dispatch_is_sanitized_ambiguous() -> None:
+    source_marker = "RAW_ADMITTED_SOURCE_BYTES"
+    key_value = "RAW_FILE_API_KEY_BYTES-" + "x" * 32
+    body = _body()
+    body["input"] = source_marker
+
+    class CancelledClient(FakeClient):
+        started = asyncio.Event()
+        private_state = "RAW_CLIENT_STATE_BYTES"
+
+        async def create(self, **kwargs: object) -> object:
+            self.request = kwargs
+            self.started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    async def exercise(adapter: OpenAIResponsesAdapter, client: CancelledClient) -> Exception:
+        dispatch = _dispatch(body, release_profile_digest=adapter.profile.digest())
+        task = asyncio.create_task(adapter.generate(dispatch, body))
+        await client.started.wait()
+        task.cancel()
+        with pytest.raises(ProviderAmbiguousError) as caught:
+            await task
+        return caught.value
+
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", key_value)
+        client = CancelledClient(_response())
+        adapter = OpenAIResponsesAdapter(_profile_for_key(key_value), key,
+            credential_generation=1, client_factory=lambda **_kwargs: client)
+        error = asyncio.run(exercise(adapter, client))
+    _assert_product_frames_sanitized(
+        error, source_marker, key_value, client.private_state
+    )
+    TestCase().assertTrue(client.closed)
+
+
 def test_cleanup_only_deadline_is_ambiguous_with_response_receipt_time() -> None:
     body = _body()
 

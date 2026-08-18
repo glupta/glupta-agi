@@ -119,7 +119,7 @@ class OpenAIResponsesAdapter:
                 completed = datetime.now(UTC)
         except APIStatusError as exc:
             provider_status = exc.status_code
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             request_ambiguous = True
         finally:
             if client is not None:
@@ -128,7 +128,7 @@ class OpenAIResponsesAdapter:
                     try:
                         async with asyncio.timeout_at(monotonic_deadline):
                             await close()
-                    except Exception:
+                    except (Exception, asyncio.CancelledError):
                         cleanup_ambiguous = True
         if request_ambiguous:
             raise ProviderAmbiguousError("OpenAI request outcome is ambiguous") from None
