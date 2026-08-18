@@ -1,0 +1,33 @@
+{
+  "verdict": "RESTART_REQUIRED",
+  "material_blockers": [
+    {
+      "summary": "The adapter treats every OpenAI APIStatusError as a definitive provider rejection. This includes timeout and server-error responses where acceptance, execution, or usage may be uncertain, but the binding contract requires those cases to become sticky unknown.",
+      "evidence": [
+        "Packet lines 55–62 permit failed only for a complete authenticated rejection and require timeout or uncertain acceptance/usage to remain sticky unknown.",
+        "product/src/glupta_agi/openai_adapter.py:97–125 catches APIStatusError without a status or certainty distinction and raises ProviderRejectedError.",
+        "product/src/glupta_agi/workflow.py:156–159 persists ProviderRejectedError as terminal failed.",
+        "product/tests/test_openai_adapter.py:189–208 explicitly treats HTTP 500 as definitive rejection.",
+        "The product-pinned OpenAI SDK 2.45.0 classifies HTTP 408 and 5xx responses under APIStatusError; its retry classifier identifies 408 as request timeout and 5xx as retryable server failure."
+      ],
+      "defect_class": "Production code/contract defect: unsafe external-effect outcome classification and false terminal state.",
+      "disposition": "Repair the adapter so only proven non-acceptance becomes ProviderRejectedError; map HTTP 408, ambiguous 5xx, and every other unproven outcome to ProviderAmbiguousError/sticky unknown. Add adapter, workflow, replay, and PostgreSQL regression tests, then freeze and review a new candidate. No remediation belongs inside this frozen audit."
+    }
+  ],
+  "non_blocking_findings": [
+    "Authentication passed: both supplied top-level SHA-256 hashes match, all 45 manifest entries validate against the three pinned commits, and the two git-crypt entries validate through their committed content filters.",
+    "The three stated R3 repairs—failed-to-unknown recovery, cleanup ambiguity handling, and awaited async evaluation—are present in the exact candidate.",
+    "Release, provider/account, deployment, rollback, and task-drain gates remain accurately held; they are not themselves packet blockers and grant no authority."
+  ],
+  "factual_corrections": [
+    "APIStatusError is not synonymous with complete authenticated provider rejection in the pinned SDK; it also encompasses HTTP timeout and server-error outcomes that the packet requires to remain unknown."
+  ],
+  "foundation_disposition": {
+    "action": "repair",
+    "cost": "Focused adapter-classification repair, adversarial regression tests, deterministic verification, and a newly hashed R4 review packet.",
+    "risk": "High if unrepaired: an accepted or charged request can be recorded as terminal failed, concealing usage and enabling an unsafe retry decision.",
+    "rollback": "Preserve R3 unchanged as rejected audit evidence; do not deploy, dispatch, drain tasks, or activate any stage from it.",
+    "dispatch_held": true
+  },
+  "confidence_and_uncertainty": "High confidence. The blocker is established directly from the authenticated packet, exact candidate code/tests, and pinned SDK behavior. Historical reviewer outputs and peer-review results were excluded. No credentials, provider call, deployment, production remediation, or activation was performed."
+}

@@ -35,6 +35,14 @@ Preserve these constraints:
   store, message bus, eval platform, provider framework, or compatibility layer.
 - A stage advances only after a useful end-to-end result and its fixed gates pass.
   Prefer deleting a losing component to surrounding it with more control code.
+- Every Glupta version-identity change requires a fresh exact-candidate frontier
+  review before release. Run deterministic preflight, then fresh native Codex
+  `gpt-5.6-sol` at maximum reasoning as a hard gate; only after it finds zero
+  substantiated material blockers may blind Fable maximum and Grok xhigh review
+  the identical candidate/hash. Approval requires all three completed reviews
+  to find zero substantiated material blockers. Any reviewed-byte change
+  invalidates the approval and restarts review. This gate grants no deployment,
+  provider-dispatch, credential, spend, task-drain, stage, or outbound authority.
 
 If a requested change conflicts with the Blueprint, stop and surface the conflict
 instead of silently implementing a parallel architecture.
