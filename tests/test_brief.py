@@ -66,6 +66,34 @@ class SystemPromptTests(unittest.TestCase):
             "must change the subject or evidence packet rather than repeat the current task",
             prompt,
         )
+        self.assertIn(
+            "Preserve source nouns and exact values, including signs, dates, names, and status "
+            "tokens",
+            prompt,
+        )
+        self.assertIn(
+            "State each uncertainty as a short direct claim naming the subject and whether its "
+            "evidence is missing, conflicting, or insufficient",
+            prompt,
+        )
+        self.assertIn(
+            "Do not repeat an unsupported conclusion in any prose field, even to negate it",
+            prompt,
+        )
+        self.assertIn(
+            "Use active verb-object wording for the immediate remediation of a failed gate",
+            prompt,
+        )
+        for case_specific_phrase in (
+            "conflicting budget values",
+            "owner is not stated",
+            "one trial is insufficient",
+            "deployed version is not evidenced",
+            "rerun the security test",
+        ):
+            self.assertNotIn(case_specific_phrase, prompt.casefold())
+        for oracle_placeholder in ("<subject>", "<sample>", "<action>"):
+            self.assertNotIn(oracle_placeholder, prompt)
         self.assertNotIn("classify every material requirement", prompt)
         self.assertIn(
             "Return citations only in the citations field; do not add citation labels or markers "
