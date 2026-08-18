@@ -67,30 +67,34 @@ def _read_api_key(path: Path, expected_sha256: str) -> str:
 
 
 class OpenAIResponsesAdapter:
-    def __init__(
-        self, profile: ReleaseProfile, credential_file: Path, *, credential_generation: int,
-        client_factory: Callable[..., Any] = AsyncOpenAI,
-    ) -> None:
+    def __init__(self, profile: ReleaseProfile, credential_file: Path, *,
+        credential_generation: int, client_factory: Callable[..., Any] = AsyncOpenAI) -> None:
         self.profile = profile
         self.credential_file = credential_file
         self.credential_generation = credential_generation
         self.client_factory = client_factory
 
     async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> contracts.ProviderResult:  # noqa: E501
+        error: tuple[type[AdapterError], str, contracts.ProviderAudit | None] | None = None
+        try:
+            result = await self._generate(dispatch, request_body)
+        except AdapterError as exc:
+            error = type(exc), str(exc), exc.audit
+        if error is not None:
+            del self, dispatch, request_body
+            raise error[0](error[1], error[2]) from None
+        return result
+
+    async def _generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> contracts.ProviderResult:  # noqa: E501
         if not self.profile.current_at():
             raise AdapterError("release profile evidence is expired")
         if dispatch.release_profile_digest != self.profile.digest():
             raise AdapterError("release profile changed after effect reservation")
         if dispatch.request_body_digest != contracts.canonical_digest(request_body) or request_body.get("service_tier") != dispatch.service_tier:  # noqa: E501
             raise AdapterError("provider request changed after effect reservation")
-        expected_identity = (self.profile.disclosure_profile, contracts.DISCLOSURE_NOTICE_DIGEST,
-            True, self.profile.service_tier, self.profile.project_id,
-            self.profile.service_account_id, self.profile.api_key_id, self.credential_generation)
-        observed_identity = (dispatch.disclosure_profile, dispatch.disclosure_notice_digest,
-            dispatch.external_disclosure_ack, dispatch.service_tier, dispatch.project_id,
-            dispatch.service_account_id, dispatch.api_key_id, dispatch.credential_generation)
-        if (observed_identity != expected_identity
-                or self.credential_generation != self.profile.credential_generation):
+        expected_identity = (self.profile.disclosure_profile, contracts.DISCLOSURE_NOTICE_DIGEST, True, self.profile.service_tier, self.profile.project_id, self.profile.service_account_id, self.profile.api_key_id, self.credential_generation)  # noqa: E501
+        observed_identity = (dispatch.disclosure_profile, dispatch.disclosure_notice_digest, dispatch.external_disclosure_ack, dispatch.service_tier, dispatch.project_id, dispatch.service_account_id, dispatch.api_key_id, dispatch.credential_generation)  # noqa: E501
+        if observed_identity != expected_identity or self.credential_generation != self.profile.credential_generation:  # noqa: E501
             raise AdapterError("provider identity changed after effect reservation")
         if any(name.startswith("OPENAI_") for name in os.environ):
             raise AdapterError("unsupported ambient OpenAI configuration is present")
@@ -105,14 +109,10 @@ class OpenAIResponsesAdapter:
         monotonic_deadline = asyncio.get_running_loop().time() + remaining_seconds
         try:
             http_client = DefaultAsyncHttpxClient(trust_env=False, follow_redirects=False)
-            client = self.client_factory(
-                api_key=key, base_url=self.profile.endpoint, max_retries=0,
-                timeout=min(float(dispatch.wall_timeout_seconds), remaining_seconds),
-                organization="", project=self.profile.project_id, admin_api_key="",
-                webhook_secret="", default_headers={"Authorization": f"Bearer {key}",
-                    "OpenAI-Project": self.profile.project_id, "OpenAI-Organization": Omit()},
-                http_client=http_client,
-            )
+            client = self.client_factory(api_key=key, base_url=self.profile.endpoint,
+                max_retries=0, timeout=min(float(dispatch.wall_timeout_seconds), remaining_seconds),
+                organization="", project=self.profile.project_id, admin_api_key="", webhook_secret="",  # noqa: E501
+                default_headers={"Authorization": f"Bearer {key}", "OpenAI-Project": self.profile.project_id, "OpenAI-Organization": Omit()}, http_client=http_client)  # noqa: E501
             async with asyncio.timeout_at(monotonic_deadline):
                 headers = {"X-Client-Request-Id": client_request_id}
                 response = await client.responses.create(**request_body, extra_headers=headers)
@@ -145,33 +145,26 @@ class OpenAIResponsesAdapter:
             if not request_id or not response_id:
                 raise ValueError
             usage = response.usage
-            invalid_fields = (_field_names(usage) != _USAGE_FIELDS
-                or _field_names(usage.input_tokens_details) != _INPUT_DETAIL_FIELDS
-                or _field_names(usage.output_tokens_details) != _OUTPUT_DETAIL_FIELDS)
+            invalid_fields = (_field_names(usage) != _USAGE_FIELDS or _field_names(usage.input_tokens_details) != _INPUT_DETAIL_FIELDS or _field_names(usage.output_tokens_details) != _OUTPUT_DETAIL_FIELDS)  # noqa: E501
             if invalid_fields:
                 raise ValueError
-            input_tokens, output_tokens, total_tokens = (
-                usage.input_tokens, usage.output_tokens, usage.total_tokens)
+            input_tokens, output_tokens, total_tokens = usage.input_tokens, usage.output_tokens, usage.total_tokens  # noqa: E501
             input_details = usage.input_tokens_details
             cached_tokens = input_details.cached_tokens
             cache_write_tokens = input_details.cache_write_tokens
             reasoning_tokens = usage.output_tokens_details.reasoning_tokens
-            token_counts = (input_tokens, output_tokens, total_tokens, cached_tokens,
-                            cache_write_tokens, reasoning_tokens)
+            token_counts = input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens, reasoning_tokens  # noqa: E501
             if any(type(value) is not int or value < 0 for value in token_counts):
                 raise ValueError
         except Exception:
             invalid_response = True
         if invalid_response or service_tier != dispatch.service_tier:
             raise ProviderAmbiguousError("OpenAI response or usage is invalid") from None
-        if (total_tokens != input_tokens + output_tokens
-                or cached_tokens + cache_write_tokens > input_tokens
-                or reasoning_tokens > output_tokens):
+        if total_tokens != input_tokens + output_tokens or cached_tokens + cache_write_tokens > input_tokens or reasoning_tokens > output_tokens:  # noqa: E501
             raise ProviderAmbiguousError("OpenAI usage is inconsistent")
         cost = usd_upper_bound(input_tokens, output_tokens)
         observed = (input_tokens, output_tokens, reasoning_tokens, cost)
-        limits = (dispatch.input_token_upper_bound, dispatch.max_output_tokens,
-                  self.profile.max_reasoning_tokens, dispatch.max_usd_micros)
+        limits = dispatch.input_token_upper_bound, dispatch.max_output_tokens, self.profile.max_reasoning_tokens, dispatch.max_usd_micros  # noqa: E501
         if any(value > limit for value, limit in zip(observed, limits, strict=True)):
             raise ProviderAmbiguousError("OpenAI usage exceeds the reserved budget")
         audit = contracts.ProviderAudit(

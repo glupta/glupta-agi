@@ -129,6 +129,23 @@ def _assert_sanitized(error: Exception, marker: str) -> None:
     case.assertNotIn(marker, "".join(traceback.format_exception(error)))
 
 
+def _assert_product_frames_sanitized(error: BaseException, *markers: str) -> None:
+    case = TestCase()
+    current: BaseException | None = error
+    while current is not None:
+        case.assertIsNone(current.__context__)
+        case.assertIsNone(current.__cause__)
+        traceback_cursor = current.__traceback__
+        while traceback_cursor is not None:
+            frame = traceback_cursor.tb_frame
+            if "/src/glupta_agi/" in frame.f_code.co_filename:
+                captured_locals = repr(frame.f_locals)
+                for marker in markers:
+                    case.assertNotIn(marker, captured_locals)
+            traceback_cursor = traceback_cursor.tb_next
+        current = current.__cause__ or current.__context__
+
+
 def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None:
     body = _body()
     client = FakeClient(_response())
@@ -350,12 +367,17 @@ def test_missing_or_mismatched_returned_service_tier_is_ambiguous(service_tier: 
 
 def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensitive_object() -> None:
     marker = "RAW_PROVIDER_VALIDATION_MARKER"
+    source_marker = "RAW_ADMITTED_SOURCE_BYTES"
+    client_marker = "RAW_CLIENT_STATE_BYTES"
     body = _body()
+    body["input"] = source_marker
     request = Request("POST", "https://api.openai.com/v1/responses")
     response = Response(200, request=request)
     provider_error = APIResponseValidationError(
         response=response, body={"secret": marker}, message=marker
     )
+    client = FakeClient(provider_error)
+    client.private_state = client_marker
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         key_value = "file-api-key-" + "x" * 32
@@ -364,11 +386,14 @@ def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensiti
             _profile_for_key(key_value),
             key,
             credential_generation=1,
-            client_factory=lambda **_kwargs: FakeClient(provider_error),
+            client_factory=lambda **_kwargs: client,
         )
         with pytest.raises(ProviderAmbiguousError) as caught:
             _generate(adapter, body)
         _assert_sanitized(caught.value, marker)
+        _assert_product_frames_sanitized(
+            caught.value, marker, source_marker, client_marker, key_value
+        )
 
         invalid_key = root / "invalid-key"
         invalid_key.write_bytes(b"\xffRAW_CREDENTIAL_BYTES" + b"x" * 32)
@@ -382,6 +407,7 @@ def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensiti
         with pytest.raises(AdapterError) as invalid_caught:
             _generate(invalid_adapter, body)
         _assert_sanitized(invalid_caught.value, "RAW_CREDENTIAL_BYTES")
+        _assert_product_frames_sanitized(invalid_caught.value, "RAW_CREDENTIAL_BYTES")
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])

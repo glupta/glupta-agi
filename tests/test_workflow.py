@@ -190,6 +190,23 @@ def _run(packet: _CrawlModelPacket, *, adapter_factory: object) -> tuple[Evidenc
     return asyncio.run(_run_inference(packet, adapter_factory=adapter_factory))
 
 
+def _assert_product_frames_sanitized(error: BaseException, *markers: str) -> None:
+    current: BaseException | None = error
+    while current is not None:
+        self_case = unittest.TestCase()
+        self_case.assertIsNone(current.__context__)
+        self_case.assertIsNone(current.__cause__)
+        traceback_cursor = current.__traceback__
+        while traceback_cursor is not None:
+            frame = traceback_cursor.tb_frame
+            if "/src/glupta_agi/" in frame.f_code.co_filename:
+                captured_locals = repr(frame.f_locals)
+                for marker in markers:
+                    self_case.assertNotIn(marker, captured_locals)
+            traceback_cursor = traceback_cursor.tb_next
+        current = current.__cause__ or current.__context__
+
+
 class WorkflowTests(unittest.TestCase):
     def test_queue_agent_and_retry_contract_are_fixed(self) -> None:
         self.assertEqual(crawl_observe_queue.concurrency, 1)
@@ -280,6 +297,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(responses[0], responses[1])
         self.assertEqual(responses[0]["provider_audit"]["provider_request_id"], "req_1")
         self.assertEqual(responses[0]["provider_audit"]["cost_upper_bound_micros"], 1_225)
+
+    def test_public_workflow_exception_drops_admitted_payload_traceback_locals(self) -> None:
+        marker = "RAW_ADMITTED_SOURCE_BYTES"
+        with (
+            patch.object(_crawl_agent, "run", new=AsyncMock(
+                side_effect=BriefGenerationError("provider response was rejected"))),
+            self.assertRaises(BriefGenerationError) as caught,
+        ):
+            asyncio.run(inspect.unwrap(evidence_brief_workflow)(
+                _admitted(source_content=marker), _WORKFLOW_ID,
+                release_profile().model_dump(mode="json"), "/private/key", 1,
+                datetime.now(UTC).isoformat()))
+        _assert_product_frames_sanitized(caught.exception, marker)
 
     def test_replay_rejects_result_or_audit_digest_tampering_without_adapter(self) -> None:
         recorded = EvidenceBrief(
@@ -476,6 +506,18 @@ class WorkflowTests(unittest.TestCase):
             response = asyncio.run(_crawl_model([message], Mock()))
         self.assertEqual(response.parts[0].content, '"unknown"')
 
+    def test_definitive_model_step_exception_drops_raw_packet_traceback_locals(self) -> None:
+        marker = "RAW_ADMITTED_SOURCE_BYTES"
+        message = ModelRequest(parts=[UserPromptPart(
+            _packet(source_content=marker).model_dump_json())])
+        with (
+            patch("glupta_agi.workflow._run_inference",
+                  side_effect=BriefGenerationError("provider response was rejected")),
+            self.assertRaises(BriefGenerationError) as caught,
+        ):
+            asyncio.run(_crawl_model([message], Mock()))
+        _assert_product_frames_sanitized(caught.exception, marker)
+
     def test_expired_queue_and_oversized_prompt_reject_before_adapter(self) -> None:
         factory = Mock()
         with (
@@ -517,6 +559,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_ambiguous_provider_failure_is_redacted_and_sticky(self) -> None:
         sentinel = "RAW_PROVIDER_MARKER"
+        source_marker = "RAW_ADMITTED_SOURCE_BYTES"
 
         class FailingAdapter(FakeAdapter):
             async def generate(self, _dispatch: object, _body: dict[str, object]) -> ProviderResult:
@@ -532,8 +575,9 @@ class WorkflowTests(unittest.TestCase):
             patch("glupta_agi.workflow.hold_unknown", side_effect=hold),
             self.assertRaises(AmbiguousEffectError) as caught,
         ):
-            _run(_packet(), adapter_factory=FailingAdapter)
+            _run(_packet(source_content=source_marker), adapter_factory=FailingAdapter)
         self.assertNotIn(sentinel, "".join(traceback.format_exception(caught.exception)))
+        _assert_product_frames_sanitized(caught.exception, sentinel, source_marker)
 
     def test_retryable_provider_status_routes_to_sticky_unknown(self) -> None:
         request = Request("POST", "https://api.openai.com/v1/responses")
@@ -661,10 +705,14 @@ class WorkflowTests(unittest.TestCase):
             def exercise() -> None:
                 error = BriefGenerationError if fault == "after_commit" else AmbiguousEffectError
                 with self.assertRaises(error) as first:
-                    _run(_packet(), adapter_factory=TerminalAdapter)
+                    _run(_packet(source_content="RAW_SOURCE"), adapter_factory=TerminalAdapter)
                 with self.assertRaises(error):
-                    _run(_packet(), adapter_factory=TerminalAdapter)
+                    _run(_packet(source_content="RAW_SOURCE"), adapter_factory=TerminalAdapter)
                 self.assertNotIn("RAW_", "".join(traceback.format_exception(first.exception)))
+                _assert_product_frames_sanitized(
+                    first.exception, "RAW_PROVIDER", "RAW_SOURCE", "RAW_TRANSITION",
+                    "RAW_READBACK",
+                )
 
             with (
                 patch("glupta_agi.workflow.reserve", side_effect=reserve_effect),
