@@ -13,7 +13,7 @@ from .intake import IntakeError, load_request
 from .settings import Settings, SettingsError, get_settings
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
-app = FastAPI(title="glupta agi", version="0.2.7", docs_url=None, redoc_url=None)
+app = FastAPI(title="glupta agi", version="0.2.8", docs_url=None, redoc_url=None)
 
 
 def _bearer(authorization: str | None, settings: Settings) -> None:

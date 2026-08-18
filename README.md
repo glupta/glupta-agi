@@ -19,9 +19,10 @@ Current build state:
 - one predeclared `model-0` effect slot fences the external model call before
   dispatch through a DBOS datasource transaction and fails closed when a crash
   leaves its outcome ambiguous;
-- the official Codex SDK binds a non-ephemeral thread and turn to that effect;
-  the turn is read-only, web/tool-disabled, clean-environment launched, and
-  pinned to `gpt-5.6-sol` with `medium` reasoning;
+- the official Codex SDK binds ephemeral thread and turn IDs to that effect;
+  transcript history is disabled and per-call SQLite state is deleted from the
+  bounded tmpfs on normal closure; the turn is read-only, web/tool-disabled,
+  clean-environment launched, and pinned to `gpt-5.6-sol` with `medium` reasoning;
 - runtime bearer material is read from a private file and never persisted;
 - PostgreSQL is not published and the intake API is loopback-only;
 - no live messaging or action tools are present.
