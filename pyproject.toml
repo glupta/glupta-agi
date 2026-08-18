@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "glupta-agi"
-version = "0.2.7"
+version = "0.2.8"
 description = "Private source-grounded evidence briefs for glupta agi"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

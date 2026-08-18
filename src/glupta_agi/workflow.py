@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -47,7 +48,7 @@ class _CrawlModelPacket(BaseModel):
     request_digest: str
 
 
-def _codex_launch_args(environment: dict[str, str]) -> tuple[str, ...]:
+def _codex_launch_args(environment: dict[str, str], sqlite_home: str) -> tuple[str, ...]:
     env_binary = shutil.which("env", path=os.defpath)
     if env_binary is None:
         raise BriefGenerationError("clean Codex environment launcher is unavailable")
@@ -62,6 +63,10 @@ def _codex_launch_args(environment: dict[str, str]) -> tuple[str, ...]:
         str(bundled_codex_path()),
         "-c",
         'cli_auth_credentials_store="file"',
+        "-c",
+        'history.persistence="none"',
+        "-c",
+        f"sqlite_home={json.dumps(sqlite_home)}",
         "app-server",
         *disabled_features,
         "--listen",
@@ -122,7 +127,10 @@ def _run_codex(
     if effect.state in {"dispatching", "thread_started", "unknown"}:
         hold_unknown(effect, f"recovery_from_{effect.state}")
 
-    with tempfile.TemporaryDirectory(prefix="glupta-crawl-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="glupta-crawl-") as temporary,
+        tempfile.TemporaryDirectory(prefix="glupta-crawl-state-", dir=codex_home) as state_home,
+    ):
         bundled_tools = bundled_path_dir()
         search_path = os.defpath
         if bundled_tools is not None:
@@ -135,7 +143,7 @@ def _run_codex(
             "TMPDIR": tempfile.gettempdir(),
             "STUDIO_CODEX_SESSION_ORIGIN": "glupta-crawl-v1",
         }
-        launch_args = _codex_launch_args(environment)
+        launch_args = _codex_launch_args(environment, state_home)
         client = None
         invalid_output = False
         provider_failure: str | None = None
@@ -173,7 +181,7 @@ def _run_codex(
                     "web_search": WebSearchMode.disabled.value,
                 },
                 cwd=temporary,
-                ephemeral=False,
+                ephemeral=True,
                 model=model_name,
                 sandbox=Sandbox.read_only,
             )

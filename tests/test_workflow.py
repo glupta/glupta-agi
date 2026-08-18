@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import traceback
 import unittest
 from types import SimpleNamespace
@@ -93,6 +94,13 @@ class FakeClient:
 
 
 class CodexBriefTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._codex_home = tempfile.TemporaryDirectory(prefix="glupta-test-codex-")
+        self.codex_home = self._codex_home.name
+
+    def tearDown(self) -> None:
+        self._codex_home.cleanup()
+
     def test_crawl_model_work_is_bounded_by_one_dbos_queue_slot(self) -> None:
         self.assertEqual(crawl_observe_queue.name, "crawl-observe-v1")
         self.assertEqual(crawl_observe_queue.concurrency, 1)
@@ -129,7 +137,7 @@ class CodexBriefTests(unittest.TestCase):
             result = _run_codex(
                 "question",
                 [{"path": "compose.txt", "content": "services:"}],
-                "/run/codex",
+                self.codex_home,
                 "gpt-5.6-sol",
                 "workflow-1",
                 "digest-1",
@@ -137,7 +145,7 @@ class CodexBriefTests(unittest.TestCase):
             )
 
         self.assertEqual(result.citations[0].quote, "services:")
-        self.assertFalse(client.start_kwargs["ephemeral"])
+        self.assertTrue(client.start_kwargs["ephemeral"])
         self.assertEqual(client.start_kwargs["model"], "gpt-5.6-sol")
         config = client.start_kwargs["config"]
         self.assertIsInstance(config, dict)
@@ -165,9 +173,15 @@ class CodexBriefTests(unittest.TestCase):
             )
         )
         captured_config: list[object] = []
+        state_home_existed_during_launch: list[bool] = []
 
         def factory(config: object) -> FakeClient:
             captured_config.append(config)
+            launch_args = config.launch_args_override
+            codex_index = launch_args.index(str(bundled_codex_path()))
+            state_argument = launch_args[codex_index + 6]
+            state_home = json.loads(state_argument.removeprefix("sqlite_home="))
+            state_home_existed_during_launch.append(os.path.isdir(state_home))
             return client
 
         sentinel = "CRAWL_TEST_SENTINEL_SECRET"
@@ -179,7 +193,7 @@ class CodexBriefTests(unittest.TestCase):
             _run_codex(
                 "question",
                 [{"path": "compose.txt", "content": "services:"}],
-                "/run/codex",
+                self.codex_home,
                 "gpt-5.6-sol",
                 "workflow-1",
                 "digest-1",
@@ -207,10 +221,25 @@ class CodexBriefTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            launch_args[codex_index + 1 :],
+            launch_args[codex_index + 1 : codex_index + 6],
             (
                 "-c",
                 'cli_auth_credentials_store="file"',
+                "-c",
+                'history.persistence="none"',
+                "-c",
+            ),
+        )
+        state_argument = launch_args[codex_index + 6]
+        self.assertTrue(state_argument.startswith(f'sqlite_home="{self.codex_home}/'))
+        self.assertTrue(state_argument.endswith('"'))
+        state_home = json.loads(state_argument.removeprefix("sqlite_home="))
+        self.assertEqual(state_home_existed_during_launch, [True])
+        self.assertFalse(os.path.exists(state_home))
+        self.assertNotIn("log_dir", " ".join(launch_args))
+        self.assertEqual(
+            launch_args[codex_index + 7 :],
+            (
                 "app-server",
                 "--disable",
                 "apps",
@@ -247,7 +276,7 @@ class CodexBriefTests(unittest.TestCase):
             result = _run_codex(
                 "question",
                 [{"path": "compose.txt", "content": "services:"}],
-                "/run/codex",
+                self.codex_home,
                 "gpt-5.6-sol",
                 "workflow-1",
                 "digest-1",
@@ -256,6 +285,7 @@ class CodexBriefTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "Grounded answer.")
         factory.assert_not_called()
+        self.assertEqual(os.listdir(self.codex_home), [])
 
     def test_ambiguous_dispatch_is_held_without_second_provider_call(self) -> None:
         factory = Mock()
@@ -270,7 +300,7 @@ class CodexBriefTests(unittest.TestCase):
                 _run_codex(
                     "question",
                     [{"path": "compose.txt", "content": "services:"}],
-                    "/run/codex",
+                    self.codex_home,
                     "gpt-5.6-sol",
                     "workflow-1",
                     "digest-1",
@@ -289,7 +319,7 @@ class CodexBriefTests(unittest.TestCase):
                 _run_codex(
                     "question",
                     [{"path": "compose.txt", "content": "services:"}],
-                    "/run/codex",
+                    self.codex_home,
                     "gpt-5.6-sol",
                     "workflow-1",
                     "digest-1",
@@ -326,7 +356,7 @@ class CodexBriefTests(unittest.TestCase):
                 _run_codex(
                     "question",
                     [{"path": "compose.txt", "content": "services:"}],
-                    "/run/codex",
+                    self.codex_home,
                     "gpt-5.6-sol",
                     "workflow-1",
                     "digest-1",
@@ -342,6 +372,7 @@ class CodexBriefTests(unittest.TestCase):
         self.assertNotIn(sentinel, str(caught.exception))
         self.assertNotIn(sentinel, repr(caught.exception))
         self.assertNotIn(sentinel, rendered)
+        self.assertEqual(os.listdir(self.codex_home), [])
 
     def test_pre_turn_value_error_is_provider_failure_not_invalid_output(self) -> None:
         sentinel = "CRAWL_PROVIDER_VALUE_ERROR_SENTINEL"
@@ -368,7 +399,7 @@ class CodexBriefTests(unittest.TestCase):
                 _run_codex(
                     "question",
                     [{"path": "compose.txt", "content": "services:"}],
-                    "/run/codex",
+                    self.codex_home,
                     "gpt-5.6-sol",
                     "workflow-1",
                     "digest-1",
