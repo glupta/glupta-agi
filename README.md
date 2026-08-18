@@ -14,8 +14,8 @@ Current build state:
 - secure intake and request canonicalization are implemented;
 - DBOS owns durable execution and idempotency;
 - one DBOS-native queue bounds all Crawl model work to one concurrent workflow;
-- Pydantic AI's native `DBOSAgent`/`DBOSModel` boundary durably wraps the one
-  typed model request with provider retries disabled;
+- Pydantic AI v2's native `DBOSDurability` capability routes the one typed
+  model request through a DBOS step with provider retries disabled;
 - one predeclared `model-0` effect slot fences the external model call before
   dispatch through a DBOS datasource transaction and fails closed when a crash
   leaves its outcome ambiguous;
