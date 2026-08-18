@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .contracts import EvidenceBriefResponse
 from .intake import IntakeError, _validate_relative_path
 
 MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_SECONDS = 2 * 1024 * 1024, 330
@@ -149,12 +150,10 @@ def submit(
     if len(body) > MAX_RESPONSE_BYTES:
         raise ClientError("server response exceeds the client limit")
     try:
-        result = json.loads(body)
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ClientError("server returned an invalid JSON response") from exc
-    if not isinstance(result, dict) or not isinstance(result.get("markdown"), str):
-        raise ClientError("server returned an invalid evidence brief")
-    return result
+        result = EvidenceBriefResponse.model_validate_json(body)
+    except ValueError as exc:
+        raise ClientError("server returned an invalid evidence brief") from exc
+    return result.model_dump(mode="json")
 
 
 def _parser() -> argparse.ArgumentParser:

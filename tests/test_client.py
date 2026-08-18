@@ -16,7 +16,6 @@ from unittest.mock import patch
 from glupta_agi.client import (
     ClientError,
     _NoRedirect,
-    _read_capability,
     _validate_endpoint,
     _validate_token_metadata,
     main,
@@ -116,14 +115,27 @@ class ClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             short = self._token(root, "short")
-            with self.assertRaises(ClientError):
-                _read_capability(short)
-            short.unlink()
-            target = self._token(root)
+            target = root / "target"
+            target.write_text("secret-" + "x" * 40, encoding="utf-8")
+            target.chmod(0o600)
             link = root / "link"
             link.symlink_to(target)
-            with self.assertRaises(ClientError):
-                _read_capability(link)
+            group_readable = root / "group-readable"
+            group_readable.write_text("secret-" + "x" * 40, encoding="utf-8")
+            group_readable.chmod(0o640)
+            oversized = root / "oversized"
+            oversized.write_text("x" * 4097, encoding="utf-8")
+            oversized.chmod(0o600)
+            for invalid_path in (short, link, group_readable, oversized, root / "missing", root):
+                with self.subTest(invalid_path=invalid_path):
+                    with self.assertRaises(ClientError):
+                        submit(
+                            "q",
+                            ["one.md"],
+                            "http://127.0.0.1:8765",
+                            invalid_path,
+                            opener=lambda *_a, **_k: self.fail("network dispatch"),
+                        )
 
     def test_endpoint_source_and_idempotency_validation_precede_dispatch(self) -> None:
         for endpoint in (
@@ -188,6 +200,15 @@ class ClientTests(unittest.TestCase):
                     "http://127.0.0.1:8765",
                     token,
                     opener=lambda *_a, **_k: _Response(b"not-json"),
+                )
+
+            with self.assertRaises(ClientError):
+                submit(
+                    "q",
+                    ["one.md"],
+                    "http://127.0.0.1:8765",
+                    token,
+                    opener=lambda *_a, **_k: _Response(b'{"markdown":"incomplete"}'),
                 )
 
     def test_main_reports_safe_error(self) -> None:
