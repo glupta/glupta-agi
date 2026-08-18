@@ -29,6 +29,8 @@ from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_ci
 from .contracts import EvidenceBrief
 from .effects import AmbiguousEffectError, hold_unknown, reserve, transition
 
+_GLOBAL_DISABLED_FEATURES = ("apps", "plugins", "remote_plugin")
+
 
 class BriefGenerationError(RuntimeError):
     """Codex did not produce a valid source-grounded brief."""
@@ -50,6 +52,9 @@ def _codex_launch_args(environment: dict[str, str]) -> tuple[str, ...]:
     if env_binary is None:
         raise BriefGenerationError("clean Codex environment launcher is unavailable")
     assignments = tuple(f"{key}={value}" for key, value in sorted(environment.items()))
+    disabled_features = tuple(
+        argument for feature in _GLOBAL_DISABLED_FEATURES for argument in ("--disable", feature)
+    )
     return (
         env_binary,
         "-i",
@@ -58,6 +63,7 @@ def _codex_launch_args(environment: dict[str, str]) -> tuple[str, ...]:
         "-c",
         'cli_auth_credentials_store="file"',
         "app-server",
+        *disabled_features,
         "--listen",
         "stdio://",
     )
