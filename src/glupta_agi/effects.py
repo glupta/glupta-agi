@@ -144,8 +144,8 @@ def _effect(row: dict[str, Any]) -> Effect:
             provider_audit.request_digest != frozen.request_digest,
             provider_audit.release_profile_digest != frozen.release_profile_digest,
             provider_audit.request_body_digest != frozen.request_body_digest,
-            provider_audit.requested_model != frozen.model,
-            provider_audit.returned_model != frozen.model, provider_audit.status != "completed",
+            provider_audit.requested_model != frozen.model, provider_audit.returned_model != frozen.model,  # noqa: E501
+            provider_audit.service_tier != frozen.service_tier, provider_audit.status != "completed",  # noqa: E501
             provider_audit.cost_upper_bound_micros > frozen.max_usd_micros)
         if any(invalid):
             raise RuntimeError("external effect result and audit do not match")

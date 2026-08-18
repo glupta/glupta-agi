@@ -93,6 +93,7 @@ def _audit(**overrides: object) -> ProviderAudit:
         "response_id": "resp_1",
         "requested_model": "gpt-5.6-sol",
         "returned_model": "gpt-5.6-sol",
+        "service_tier": "default",
         "status": "completed",
         "input_tokens": 100,
         "cached_input_tokens": 0,
@@ -211,6 +212,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNotNone(body)
         self.assertEqual(body["model"], "gpt-5.6-sol")
         self.assertEqual(body["reasoning"], {"effort": "medium"})
+        self.assertEqual(body["service_tier"], "default")
         self.assertEqual(body["tools"], [])
         self.assertEqual(body["tool_choice"], "none")
         self.assertFalse(body["store"])
@@ -322,6 +324,7 @@ class WorkflowTests(unittest.TestCase):
             {"reasoning_tokens": 21},
             {"cached_input_tokens": 60, "cache_write_input_tokens": 60},
             {"cost_upper_bound_micros": 1},
+            {"service_tier": "priority"},
         ):
             audit = _recorded_audit(recorded).model_copy(update=mutation)
             audit = audit.model_copy(update={"record_digest": provider_record_digest(brief, audit)})

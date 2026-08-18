@@ -44,7 +44,7 @@ def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
         "reasoning": {"effort": "medium"},
         "text": {"format": {"type": "json_schema", "name": "crawl_evidence_brief",
                             "schema": schema, "strict": True}},
-        "max_output_tokens": profile.max_output_tokens, "store": False, "background": False,
+        "max_output_tokens": profile.max_output_tokens, "service_tier": profile.service_tier, "store": False, "background": False,  # noqa: E501
         "stream": False, "tools": [], "tool_choice": "none", "truncation": "disabled"}
 
 
@@ -71,7 +71,7 @@ def _dispatch(packet: _CrawlModelPacket, admitted: Any,
         request_body_digest=contracts.canonical_digest(request_body), model=profile.model,
         release_profile_digest=profile.digest(), disclosure_profile=admitted.disclosure_profile,
         disclosure_notice_digest=admitted.disclosure_notice_digest,
-        external_disclosure_ack=admitted.external_disclosure_ack,
+        external_disclosure_ack=admitted.external_disclosure_ack, service_tier=profile.service_tier,
         project_id=profile.project_id, service_account_id=profile.service_account_id,
         api_key_id=profile.api_key_id,
         credential_generation=packet.credential_generation,

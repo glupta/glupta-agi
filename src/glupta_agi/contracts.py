@@ -54,6 +54,7 @@ class ProviderAudit(BaseModel):
     response_id: str
     requested_model: str
     returned_model: str
+    service_tier: Literal["default"]
     status: str
     input_tokens: StrictInt = Field(ge=0)
     cached_input_tokens: StrictInt = Field(ge=0)

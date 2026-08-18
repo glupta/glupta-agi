@@ -81,15 +81,14 @@ class OpenAIResponsesAdapter:
             raise AdapterError("release profile evidence is expired")
         if dispatch.release_profile_digest != self.profile.digest():
             raise AdapterError("release profile changed after effect reservation")
-        if dispatch.request_body_digest != contracts.canonical_digest(request_body):
+        if dispatch.request_body_digest != contracts.canonical_digest(request_body) or request_body.get("service_tier") != dispatch.service_tier:  # noqa: E501
             raise AdapterError("provider request changed after effect reservation")
         expected_identity = (self.profile.disclosure_profile, contracts.DISCLOSURE_NOTICE_DIGEST,
-                             True, self.profile.project_id, self.profile.service_account_id,
-                             self.profile.api_key_id, self.credential_generation)
+            True, self.profile.service_tier, self.profile.project_id,
+            self.profile.service_account_id, self.profile.api_key_id, self.credential_generation)
         observed_identity = (dispatch.disclosure_profile, dispatch.disclosure_notice_digest,
-                             dispatch.external_disclosure_ack, dispatch.project_id,
-                             dispatch.service_account_id, dispatch.api_key_id,
-                             dispatch.credential_generation)
+            dispatch.external_disclosure_ack, dispatch.service_tier, dispatch.project_id,
+            dispatch.service_account_id, dispatch.api_key_id, dispatch.credential_generation)
         if (observed_identity != expected_identity
                 or self.credential_generation != self.profile.credential_generation):
             raise AdapterError("provider identity changed after effect reservation")
@@ -140,11 +139,8 @@ class OpenAIResponsesAdapter:
         invalid_response = False
         try:
             status, request_id = response.status, response._request_id
-            response_id, returned_model, output_text = response.id, response.model, response.output_text  # noqa: E501
-            if not all(
-                type(value) is str for value in
-                (status, request_id, response_id, returned_model, output_text)
-            ):
+            response_id, returned_model, service_tier, output_text = response.id, response.model, response.service_tier, response.output_text  # noqa: E501
+            if not all(type(value) is str for value in (status, request_id, response_id, returned_model, service_tier, output_text)):  # noqa: E501
                 raise ValueError
             if not request_id or not response_id:
                 raise ValueError
@@ -166,7 +162,7 @@ class OpenAIResponsesAdapter:
                 raise ValueError
         except Exception:
             invalid_response = True
-        if invalid_response:
+        if invalid_response or service_tier != dispatch.service_tier:
             raise ProviderAmbiguousError("OpenAI response or usage is invalid") from None
         if (total_tokens != input_tokens + output_tokens
                 or cached_tokens + cache_write_tokens > input_tokens
@@ -183,7 +179,7 @@ class OpenAIResponsesAdapter:
             release_profile_digest=dispatch.release_profile_digest,
             client_request_id=client_request_id, provider_request_id=request_id,
             response_id=response_id, requested_model=dispatch.model,
-            returned_model=returned_model, status=status, input_tokens=input_tokens,
+            returned_model=returned_model, service_tier=service_tier, status=status, input_tokens=input_tokens,  # noqa: E501
             cached_input_tokens=cached_tokens, output_tokens=output_tokens,
             cache_write_input_tokens=cache_write_tokens,
             reasoning_tokens=reasoning_tokens, total_tokens=total_tokens,

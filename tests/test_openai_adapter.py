@@ -36,6 +36,7 @@ def _body() -> dict[str, object]:
         "reasoning": {"effort": "medium"},
         "text": {"format": {"type": "json_schema"}},
         "max_output_tokens": 4000,
+        "service_tier": "default",
         "store": False,
         "background": False,
         "stream": False,
@@ -55,6 +56,7 @@ def _dispatch(body: dict[str, object], **overrides: object) -> FrozenDispatch:
         "disclosure_profile": profile.disclosure_profile,
         "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
         "external_disclosure_ack": True,
+        "service_tier": profile.service_tier,
         "project_id": profile.project_id,
         "service_account_id": profile.service_account_id,
         "api_key_id": profile.api_key_id,
@@ -83,6 +85,7 @@ def _response(**overrides: object) -> SimpleNamespace:
         "_request_id": "req_1",
         "id": "resp_1",
         "model": "gpt-5.6-sol",
+        "service_tier": "default",
         "output_text": json.dumps(brief),
         "usage": SimpleNamespace(
             input_tokens=100,
@@ -159,6 +162,7 @@ def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None
     case.assertLessEqual(constructed["timeout"], 300)
     case.assertIsNotNone(client.request)
     case.assertEqual({key: client.request[key] for key in body}, body)
+    case.assertEqual(client.request["service_tier"], "default")
     case.assertEqual(set(client.request["extra_headers"]), {"X-Client-Request-Id"})
     case.assertTrue(client.closed)
 
@@ -203,6 +207,7 @@ def test_official_sdk_wire_headers_are_bound_to_file_key_and_approved_project() 
     [
         {"OPENAI_API_KEY": "ambient-credential", "OPENAI_PROJECT_ID": "proj_ambient"},
         {"OPENAI_LOG": "debug"},
+        {"OPENAI_SERVICE_TIER": "priority"},
         {"OPENAI_FUTURE_OVERRIDE": "future-sdk-setting"},
     ],
 )
@@ -227,6 +232,20 @@ def test_hostile_openai_environment_is_rejected_before_credential_or_wire(
         )
     read_key.assert_not_called()
     _assert_sanitized(caught.value, "RAW_SOURCE_BYTES")
+
+
+def test_unapproved_profile_or_reserved_request_tier_fails_before_credential() -> None:
+    with pytest.raises(ValueError):
+        release_profile(service_tier="priority")
+    body = _body()
+    body["service_tier"] = "priority"
+    with (
+        patch("glupta_agi.openai_adapter._read_api_key") as read_key,
+        pytest.raises(AdapterError, match="request changed"),
+    ):
+        _generate(OpenAIResponsesAdapter(release_profile(), Path("/never/read"),
+            credential_generation=1), body)
+    read_key.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -316,6 +335,17 @@ def test_model_or_schema_rejection_is_definitive_and_audited() -> None:
             TestCase().assertIsNotNone(caught.value.audit)
             if marker:
                 _assert_sanitized(caught.value, marker)
+
+
+@pytest.mark.parametrize("service_tier", [None, "priority"])
+def test_missing_or_mismatched_returned_service_tier_is_ambiguous(service_tier: object) -> None:
+    body = _body()
+    with tempfile.TemporaryDirectory() as temporary:
+        key = private_file(Path(temporary), "api-key", "secret-api-key-" + "x" * 32)
+        adapter = OpenAIResponsesAdapter(release_profile(), key, credential_generation=1,
+            client_factory=lambda **_kwargs: FakeClient(_response(service_tier=service_tier)))
+        with pytest.raises(ProviderAmbiguousError):
+            _generate(adapter, body)
 
 
 def test_provider_validation_and_invalid_credential_exceptions_retain_no_sensitive_object() -> None:

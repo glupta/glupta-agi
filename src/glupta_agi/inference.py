@@ -30,6 +30,7 @@ class ReleaseProfile(BaseModel):
     product: str
     endpoint: str
     account_class: str
+    service_tier: Literal["default"]
     project_id: str = Field(pattern=r"^proj_[A-Za-z0-9_-]+$")
     service_account_id: str = Field(min_length=3, max_length=256)
     api_key_id: str = Field(min_length=3, max_length=256)
@@ -97,6 +98,7 @@ class FrozenDispatch(BaseModel):
     disclosure_profile: Literal["external_disclosed_v1"]
     disclosure_notice_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     external_disclosure_ack: Literal[True]
+    service_tier: Literal["default"]
     project_id: str = Field(pattern=r"^proj_[A-Za-z0-9_-]+$")
     service_account_id: str = Field(min_length=3, max_length=256)
     api_key_id: str = Field(min_length=3, max_length=256)
