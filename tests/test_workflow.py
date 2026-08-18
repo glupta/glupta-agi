@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import tempfile
 import traceback
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from httpx import Request, Response
+from openai import APIStatusError
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelRequest, UserPromptPart
@@ -25,7 +28,11 @@ from glupta_agi.effects import AmbiguousEffectError, Effect
 from glupta_agi.inference import (
     FrozenDispatch,
 )
-from glupta_agi.openai_adapter import ProviderAmbiguousError, ProviderRejectedError
+from glupta_agi.openai_adapter import (
+    OpenAIResponsesAdapter,
+    ProviderAmbiguousError,
+    ProviderRejectedError,
+)
 from glupta_agi.workflow import (
     BriefGenerationError,
     _crawl_agent,
@@ -36,7 +43,7 @@ from glupta_agi.workflow import (
     crawl_observe_queue,
     evidence_brief_workflow,
 )
-from tests.helpers import release_profile
+from tests.helpers import private_file, release_profile
 
 _WORKFLOW_ID = "0198be50-0000-7000-8000-000000000000"
 
@@ -46,12 +53,13 @@ def _packet(
     prompt: str = "question",
     workflow_id: str | None = None,
     admitted_at: datetime | None = None,
+    credential_file: str = "/private/api-key",
 ) -> _CrawlModelPacket:
     return _CrawlModelPacket(
         prompt=prompt,
         sources=[{"path": "source.md", "content": "grounded fact"}],
         release_profile=release_profile(),
-        credential_file="/private/api-key",
+        credential_file=credential_file,
         admitted_at=admitted_at or datetime.now(UTC),
         workflow_id=workflow_id or _WORKFLOW_ID,
         request_digest="a" * 64,
@@ -448,6 +456,47 @@ class WorkflowTests(unittest.TestCase):
         ):
             _run(_packet(), adapter_factory=FailingAdapter)
         self.assertNotIn(sentinel, "".join(traceback.format_exception(caught.exception)))
+
+    def test_retryable_provider_status_routes_to_sticky_unknown(self) -> None:
+        request = Request("POST", "https://api.openai.com/v1/responses")
+        response = Response(429, request=request, headers={"x-request-id": "req_unknown"})
+        status_error = APIStatusError(
+            "RAW_PROVIDER_MARKER", response=response, body={"secret": "marker"}
+        )
+
+        class RejectingClient:
+            def __init__(self) -> None:
+                self.responses = self
+
+            async def create(self, **_kwargs: object) -> None:
+                raise status_error
+
+            async def close(self) -> None:
+                pass
+
+        def hold(_workflow_id: str, reason: str, **_kwargs: object) -> None:
+            self.assertEqual(reason, "provider_outcome_ambiguous")
+            raise AmbiguousEffectError("manual reconciliation required") from None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            key = private_file(Path(temporary), "api-key", "synthetic-api-key-" + "x" * 32)
+
+            def factory(profile: object, credential_file: Path) -> OpenAIResponsesAdapter:
+                return OpenAIResponsesAdapter(
+                    profile, credential_file, client_factory=lambda **_kwargs: RejectingClient()
+                )
+
+            with (
+                patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
+                patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+                patch("glupta_agi.workflow.hold_unknown", side_effect=hold),
+                self.assertRaises(AmbiguousEffectError) as caught,
+            ):
+                _run(_packet(credential_file=str(key)), adapter_factory=factory)
+        self.assertEqual(transition.call_count, 1)
+        self.assertNotIn(
+            "RAW_PROVIDER_MARKER", "".join(traceback.format_exception(caught.exception))
+        )
 
     def test_definitive_rejection_is_failed_without_retry(self) -> None:
         class RejectingAdapter(FakeAdapter):

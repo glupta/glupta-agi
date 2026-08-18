@@ -1,0 +1,69 @@
+{
+  "verdict": "RESTART_REQUIRED",
+  "material_blockers": [
+    {
+      "summary": "The credential and project identity bound in the release profile is not reliably the identity sent on the wire.",
+      "evidence": [
+        "At product 8efd3cc1907a2887a6e6c3822b70e1fe0b350ade, src/glupta_agi/openai_adapter.py:99-104 supplies api_key and base_url but neither supplies profile.project_id nor rejects SDK-specific ambient configuration.",
+        "The pinned openai==2.45.0 client reads OPENAI_ORG_ID, OPENAI_PROJECT_ID, and OPENAI_CUSTOM_HEADERS; its header merge permits custom headers to replace Authorization.",
+        "A read-only execution against the exact adapter and pinned SDK captured Authorization='Bearer ambient-credential', OpenAI-Project='proj_ambient_override', and an ambient marker despite the explicit credential argument and trust_env=False.",
+        "ReleaseProfile binds project_id, api_key_id, and credential_generation, but the adapter neither validates the credential file against that identity nor consumes project_id when constructing AsyncOpenAI."
+      ],
+      "defect_class": "credential_identity_and_fail_closed_dispatch",
+      "disposition": "In a new candidate, reject unsupported OpenAI ambient variables, explicitly bind and verify the approved project and controlled headers, and bind the mounted credential to an approved non-secret identity/version. Add hostile-environment request-header tests, then refreeze every tuple and hash."
+    },
+    {
+      "summary": "Provider and secret-derived exceptions can retain raw sensitive material through cause chains.",
+      "evidence": [
+        "At 8efd3cc:src/glupta_agi/openai_adapter.py:109-112, non-APIStatusError provider exceptions are re-raised using 'from exc'; usage failures do the same at lines 150-151, and response-schema failures at lines 187-190.",
+        "The pinned SDK's APIError/APIResponseValidationError objects retain the decoded or raw response body.",
+        "A read-only execution using the exact adapter and an APIResponseValidationError containing a marker produced ProviderAmbiguousError.__cause__ with the original body still attached.",
+        "Credential decoding failures are also chained at openai_adapter.py:61-62, where UnicodeDecodeError can retain the credential bytes in its object attribute."
+      ],
+      "defect_class": "privacy_and_error_sanitization",
+      "disposition": "Replace provider-, parser-, validation-, and secret-derived cause chains with sanitized exceptions raised from None. Test messages, complete cause chains, tracebacks, and exception attributes using marked response bodies and invalid credential bytes."
+    },
+    {
+      "summary": "The adapter accepts internally inconsistent usage and can materially understate cost.",
+      "evidence": [
+        "At 8efd3cc:src/glupta_agi/openai_adapter.py:143-156, counts are coerced with int(), and consistency checks cover total=input+output and input detail totals but not reasoning_tokens<=output_tokens.",
+        "The pinned SDK defines output_tokens_details as a breakdown of output tokens, making reasoning tokens a subset of output tokens.",
+        "A read-only execution of the exact adapter accepted input_tokens=100, output_tokens=1, reasoning_tokens=4000, and total_tokens=101, recording a cost upper bound of only 655 micros.",
+        "At 8efd3cc:src/glupta_agi/contracts.py:86-93, replay validation repeats only the total-token equality, so this inconsistent audit can remain accepted after persistence."
+      ],
+      "defect_class": "budget_and_audit_integrity",
+      "disposition": "Require strict non-boolean integer counts and all provider-defined subset relations, especially reasoning_tokens<=output_tokens, in both initial and replay validation. Price conservatively and add adversarial usage tests before refreezing."
+    },
+    {
+      "summary": "The durable effect boundary does not bind or verify disclosure acknowledgement, and the eval path can dispatch without one.",
+      "evidence": [
+        "At 8efd3cc:src/glupta_agi/intake.py:185-204, the normal API digest includes disclosure profile, notice digest, and acknowledgement.",
+        "At 8efd3cc:src/glupta_agi/workflow.py:30-38 and src/glupta_agi/inference.py:100-130, neither _CrawlModelPacket nor FrozenDispatch carries those disclosure fields; workflow.py:210-224 trusts an opaque request_digest without recomputing it from the recorded payload.",
+        "At 8efd3cc:evals/runner.py:131-153, the eval path resolves the external profile and credential and calls _run_inference with a digest covering only question and sources.",
+        "The eval CLI at evals/runner.py:195-201 has no disclosure acknowledgement input or equivalent fail-closed gate."
+      ],
+      "defect_class": "admission_and_disclosure_binding",
+      "disposition": "Make the effect boundary accept and verify one canonical admitted-request object whose digest includes the disclosure acknowledgement. Route eval dispatch through the same gate or require an explicit bound acknowledgement; reject any mismatch before credential resolution or adapter construction."
+    }
+  ],
+  "non_blocking_findings": [
+    "The packet SHA-256, manifest SHA-256, ordered candidate tuple, direct parents, and all 46 manifest-listed Git-object hashes were independently verified.",
+    "The R4 status predicate itself is correct: only 400/401/403/404/422 are terminal; 408/409/429/5xx and unclassified statuses enter the sticky-unknown path, and cleanup ambiguity overrides terminal classification.",
+    "The exact control and Blueprint objects preserve the independent release, deployment, dispatch, credential, spend, egress, rollback, Walk, public, and Hermes gates as open.",
+    "The blockers are bounded boundary-validation defects; they do not justify adding another provider gateway, framework, queue, store, or orchestrator.",
+    "Because Codex found material blockers, the hard-stop protocol requires no Fable or Grok invocation."
+  ],
+  "factual_corrections": [
+    "The packet's broad statement that provider errors are sanitized is false: only the APIStatusError branches are raised from None; other provider, parsing, validation, and credential exceptions retain causes.",
+    "The claim that every effect binds disclosure acknowledgement and exact destination/credential identity is false for the current effect schema and eval path, and the SDK can apply ambient project or custom authorization headers.",
+    "The claim of complete consistent usage validation is false because reasoning-token consistency is neither checked initially nor on replay."
+  ],
+  "foundation_disposition": {
+    "action": "repair",
+    "cost": "Moderate, bounded changes to adapter, admission/effect contracts, replay validation, tests, and reconciled control documents; no new dependency or architecture is needed.",
+    "risk": "High if unrepaired: requests may use an unapproved credential/project, sensitive provider data may reach exception telemetry, disclosure proof may be absent, and cost/audit records may be understated.",
+    "rollback": "No R4 deployment occurred. Preserve the immutable candidate and historical 0.2.10 state, create a separate repaired candidate, refreeze all hashes, and restart the Codex-first review. Historical 0.2.10 remains ineligible as a rollback target.",
+    "dispatch_held": true
+  },
+  "confidence_and_uncertainty": "High confidence. Findings come from the exact Git objects, the pinned official SDK source, and read-only executions of the exact adapter; no historical reviewer conclusion was used. No live provider call or release mutation was performed. Independent release receipts remain unexamined open gates, but none could negate these code-level defects."
+}
