@@ -25,6 +25,7 @@ from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage
 
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
 from .contracts import EvidenceBrief
@@ -89,6 +90,18 @@ def _provider_error_token(error: BaseException) -> str:
     return "provider_error"
 
 
+def _request_usage(usage: Any) -> RequestUsage:
+    if usage is None:
+        return RequestUsage(details={"sdk_usage_unavailable": 1})
+    last = usage.last
+    return RequestUsage(
+        input_tokens=last.input_tokens,
+        cache_read_tokens=last.cached_input_tokens,
+        output_tokens=last.output_tokens,
+        details={"reasoning_output_tokens": last.reasoning_output_tokens},
+    )
+
+
 def _run_codex(
     prompt: str,
     sources: list[dict[str, Any]],
@@ -98,7 +111,7 @@ def _run_codex(
     request_digest: str,
     *,
     codex_factory: Any = Codex,
-) -> EvidenceBrief:
+) -> tuple[EvidenceBrief, RequestUsage]:
     effect = reserve(workflow_id, request_digest, model_name)
 
     def validate(raw: str | dict[str, Any]) -> EvidenceBrief:
@@ -121,7 +134,7 @@ def _run_codex(
             raise BriefGenerationError("recorded model effect failed validation") from None
         if effect.state == "returned":
             transition(workflow_id, "returned", "reconciled")
-        return brief
+        return brief, _request_usage(None)
     if effect.state == "failed":
         raise BriefGenerationError("recorded model effect failed validation")
     if effect.state in {"dispatching", "thread_started", "unknown"}:
@@ -214,7 +227,7 @@ def _run_codex(
                     result=brief.model_dump(mode="json"),
                 )
                 transition(workflow_id, "returned", "reconciled")
-                return brief
+                return brief, _request_usage(getattr(result, "usage", None))
         except AmbiguousEffectError:
             raise
         except Exception as error:
@@ -250,7 +263,7 @@ def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse
     if raw_packet is None:
         raise BriefGenerationError("Crawl model packet is missing")
     packet = _CrawlModelPacket.model_validate_json(raw_packet)
-    brief = _run_codex(
+    brief, usage = _run_codex(
         packet.prompt,
         packet.sources,
         packet.codex_home,
@@ -258,7 +271,7 @@ def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse
         packet.workflow_id,
         packet.request_digest,
     )
-    return ModelResponse(parts=[TextPart(brief.model_dump_json())])
+    return ModelResponse(parts=[TextPart(brief.model_dump_json())], usage=usage)
 
 
 _crawl_durability = DBOSDurability(
