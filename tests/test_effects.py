@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
 import pytest
 
+from glupta_agi.contracts import EvidenceBrief
 from glupta_agi.effects import _effect, initialize
-from glupta_agi.inference import FrozenDispatch
+from glupta_agi.inference import (
+    FrozenDispatch,
+    ProviderAudit,
+    canonical_digest,
+    provider_record_digest,
+)
 
 
 def _row(**overrides: object) -> dict[str, object]:
@@ -65,6 +72,66 @@ def test_effect_row_retains_frozen_dispatch_result_and_audit() -> None:
     case.assertEqual(effect.dispatch["queue_deadline"], "2099-01-01T00:00:00Z")
     case.assertEqual(effect.result, {"answer": "grounded"})
     case.assertEqual(effect.audit, {"total_tokens": 10})
+
+
+def _bound_result_and_audit() -> tuple[dict[str, object], dict[str, object]]:
+    result = EvidenceBrief(
+        answer="Grounded.", citations=[], uncertainties=[], next_decisions=[]
+    ).model_dump(mode="json")
+    provider_audit = ProviderAudit(
+        client_request_id="client_1",
+        provider_request_id="req_1",
+        response_id="resp_1",
+        requested_model="gpt-5.6-sol",
+        returned_model="gpt-5.6-sol",
+        status="completed",
+        input_tokens=100,
+        cached_input_tokens=0,
+        cache_write_input_tokens=0,
+        output_tokens=20,
+        reasoning_tokens=5,
+        total_tokens=120,
+        cost_upper_bound_micros=1_225,
+        request_body_digest="c" * 64,
+        output_digest="e" * 64,
+        validated_result_digest=canonical_digest(result),
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    brief = EvidenceBrief.model_validate(result)
+    audit = provider_audit.model_copy(
+        update={"record_digest": provider_record_digest(brief, provider_audit)}
+    ).model_dump(mode="json")
+    return result, audit
+
+
+def test_returned_effect_requires_exact_result_dispatch_and_audit_binding() -> None:
+    result, audit = _bound_result_and_audit()
+    effect = _effect(_row(state="returned", result_json=result, audit_json=audit))
+    case = TestCase()
+    case.assertEqual(effect.result, result)
+    case.assertEqual(effect.audit, audit)
+
+    mutations = (
+        ({**result, "answer": "tampered"}, audit),
+        (result, {**audit, "validated_result_digest": "f" * 64}),
+        (result, {**audit, "request_body_digest": "f" * 64}),
+        (result, {**audit, "requested_model": "drifted"}),
+        (result, {**audit, "cost_upper_bound_micros": 1_850_001}),
+        (result, {**audit, "returned_model": "drifted"}),
+        (result, {**audit, "status": "failed"}),
+        (result, {**audit, "total_tokens": 999}),
+        (result, {**audit, "response_id": "tampered"}),
+    )
+    for changed_result, changed_audit in mutations:
+        with pytest.raises(RuntimeError, match="do not match"):
+            _effect(
+                _row(
+                    state="reconciled",
+                    result_json=changed_result,
+                    audit_json=changed_audit,
+                )
+            )
 
 
 def test_initialize_rejects_any_prior_or_unversioned_schema() -> None:
