@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "material_blockers",
+    "non_blocking_findings",
+    "factual_corrections",
+    "foundation_disposition",
+    "confidence_and_uncertainty"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "PASS",
+        "HOLD_MATERIAL_DISSENT",
+        "HOLD_EVIDENCE",
+        "INCOMPLETE_REVIEW",
+        "RESTART_REQUIRED"
+      ]
+    },
+    "material_blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["summary", "evidence", "defect_class", "disposition"],
+        "properties": {
+          "summary": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "string"}},
+          "defect_class": {"type": "string"},
+          "disposition": {"type": "string"}
+        }
+      }
+    },
+    "non_blocking_findings": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "factual_corrections": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "foundation_disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "cost", "risk", "rollback", "dispatch_held"],
+      "properties": {
+        "action": {"enum": ["keep", "repair", "partial_rebuild", "full_rebuild"]},
+        "cost": {"type": "string"},
+        "risk": {"type": "string"},
+        "rollback": {"type": "string"},
+        "dispatch_held": {"type": "boolean"}
+      }
+    },
+    "confidence_and_uncertainty": {"type": "string"}
+  }
+}
+
