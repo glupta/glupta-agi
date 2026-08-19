@@ -93,10 +93,21 @@ The previous regional Responses-API firewall renderer was retired with that
 metered API architecture. The native subscription route instead requires only
 the pinned Codex backend at `chatgpt.com` and managed token refresh at
 `auth.openai.com`. `deploy/egress/render_colima.py` prepares an exact Colima
-`after-boot` candidate that adopts the VM's maintained nftables and dnsmasq
-primitives: the app may reach PostgreSQL on TCP 5432 and DNS-resolved addresses
-for those two hosts on TCP 443; every other forwarded app packet is rejected.
-It does not add a proxy, sidecar, service, or custom daemon.
+`system` provisioning candidate that adopts Lima's root boot phase and the VM's
+maintained nftables and dnsmasq primitives. On the first app-down application it
+persistently masks Docker/containerd, installs a native systemd egress oneshot and
+runtime dependency drop-ins, and starts the egress unit. That unit atomically
+installs a default-deny rule for the fixed app address before the remaining
+setup. Later failure leaves the first-application mask and failsafe in
+place; success replaces the nft rule with the exact policy, verifies dnsmasq,
+and only then removes the mask. On every later boot, Docker's service
+and socket and containerd require the egress unit to succeed first.
+The app may reach PostgreSQL on TCP 5432 and DNS-resolved addresses for those
+two hosts on TCP 443; every other forwarded app packet is rejected. It does not
+add a proxy, sidecar, custom daemon, dependency, or framework. The small native
+oneshot and short first-application runtime hold are required because Lima
+records a failed system provision but still signals boot completion, and the
+container runtime can start before resumed-VM system provisioning begins.
 
 The renderer validates the exact two-service Compose network identity, pinned
 Codex 0.147.0 dependency, clean-environment launch, disabled extension surface,

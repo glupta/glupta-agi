@@ -68,7 +68,7 @@ def test_render_is_deterministic_exact_and_verifiable(tmp_path: Path) -> None:
     assert candidate.count("auth.openai.com") == 2
     assert "api.openai.com" not in candidate.replace("auth.openai.com", "")
     assert candidate.count("GLUPTA_EGRESS_BEGIN") == 1
-    assert "mode: after-boot" in candidate
+    assert "mode: system" in candidate
     assert "__GLUPTA_" not in candidate
     assert "proxy" not in candidate.lower()
     render_colima.verify_text(candidate, ROOT, TEMPLATE)
@@ -79,6 +79,71 @@ def test_render_replaces_only_its_exact_prior_block(tmp_path: Path) -> None:
     render_colima.render(_config(tmp_path), first, ROOT, TEMPLATE)
     render_colima.render(first, updated, ROOT, TEMPLATE)
     assert first.read_bytes() == updated.read_bytes()
+
+
+def test_verify_and_render_accept_colima_marker_normalization(tmp_path: Path) -> None:
+    marked, updated = tmp_path / "marked.yaml", tmp_path / "updated.yaml"
+    render_colima.render(_config(tmp_path), marked, ROOT, TEMPLATE)
+    normalized = "".join(
+        line
+        for line in marked.read_text(encoding="utf-8").splitlines(keepends=True)
+        if "GLUPTA_EGRESS_BEGIN" not in line and "GLUPTA_EGRESS_END" not in line
+    )
+    active = _config(tmp_path, normalized)
+
+    render_colima.verify_text(normalized, ROOT, TEMPLATE)
+    render_colima.render(active, updated, ROOT, TEMPLATE)
+
+    assert updated.read_bytes() == marked.read_bytes()
+
+
+def test_normalized_owned_block_does_not_authorize_unrelated_provisioning(
+    tmp_path: Path,
+) -> None:
+    marked = tmp_path / "marked.yaml"
+    render_colima.render(_config(tmp_path), marked, ROOT, TEMPLATE)
+    normalized = "".join(
+        line
+        for line in marked.read_text(encoding="utf-8").splitlines(keepends=True)
+        if "GLUPTA_EGRESS_BEGIN" not in line and "GLUPTA_EGRESS_END" not in line
+    )
+    unrelated = normalized + "provision:\n  - mode: system\n    script: echo unrelated\n"
+
+    with pytest.raises(render_colima.RenderError, match="unowned or ambiguous"):
+        render_colima.render(
+            _config(tmp_path, unrelated), tmp_path / "candidate.yaml", ROOT, TEMPLATE
+        )
+    with pytest.raises(render_colima.RenderError, match="not exact"):
+        render_colima.verify_text(unrelated, ROOT, TEMPLATE)
+
+
+@pytest.mark.parametrize("form", ("marked", "normalized"))
+@pytest.mark.parametrize("position", ("before", "after"))
+def test_owned_block_rejects_extra_item_in_same_provision_list(
+    tmp_path: Path, form: str, position: str
+) -> None:
+    marked = tmp_path / "marked.yaml"
+    render_colima.render(_config(tmp_path), marked, ROOT, TEMPLATE)
+    text = marked.read_text(encoding="utf-8")
+    if form == "normalized":
+        text = "".join(
+            line
+            for line in text.splitlines(keepends=True)
+            if "GLUPTA_EGRESS_BEGIN" not in line
+            and "GLUPTA_EGRESS_END" not in line
+        )
+    extra = "  - mode: user\n    script: echo unrelated\n"
+    if position == "before":
+        text = text.replace("provision:\n", "provision:\n" + extra, 1)
+    else:
+        text = text.replace("runtime: docker\n", extra + "runtime: docker\n", 1)
+
+    with pytest.raises(render_colima.RenderError, match="unowned or ambiguous"):
+        render_colima.render(
+            _config(tmp_path, text), tmp_path / "candidate.yaml", ROOT, TEMPLATE
+        )
+    with pytest.raises(render_colima.RenderError, match="not exact"):
+        render_colima.verify_text(text, ROOT, TEMPLATE)
 
 
 @pytest.mark.parametrize(
@@ -392,6 +457,234 @@ def test_render_refuses_model_provider_base_url_override(tmp_path: Path) -> None
         render_colima.render(_config(tmp_path), tmp_path / "candidate.yaml", repo, TEMPLATE)
 
 
+def _write_executable(path: Path, source: str) -> None:
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_template(
+    tmp_path: Path,
+    *,
+    uid: int = 0,
+    nft_fail_call: int = 0,
+    dnsmasq_test_fails: bool = False,
+    install_fail_destination: str = "",
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    fake_bin = tmp_path / "bin"
+    state = tmp_path / "state"
+    fake_bin.mkdir()
+    state.mkdir()
+    log = state / "calls.log"
+    rendered = tmp_path / "egress.sh"
+    rendered.write_text(render_colima._script(TEMPLATE), encoding="utf-8")
+    rendered.chmod(0o755)
+
+    _write_executable(fake_bin / "id", f"#!/bin/sh\nprintf '%s\\n' {uid}\n")
+    _write_executable(
+        fake_bin / "mktemp",
+        """#!/bin/sh
+count_file="$FAKE_STATE/mktemp-count"
+count=0
+[ ! -f "$count_file" ] || count="$(cat "$count_file")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$count_file"
+path="$FAKE_STATE/candidate-$count"
+: >"$path"
+printf '%s\n' "$path"
+""",
+    )
+    _write_executable(
+        fake_bin / "nft",
+        """#!/bin/sh
+if [ "$1" = list ]; then
+    exit 1
+fi
+if [ "$1" = --check ]; then
+    printf 'NFT_CHECK\n' >>"$FAKE_LOG"
+    exit 0
+fi
+count_file="$FAKE_STATE/nft-count"
+count=0
+[ ! -f "$count_file" ] || count="$(cat "$count_file")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$count_file"
+printf 'NFT_CALL_%s\n' "$count" >>"$FAKE_LOG"
+cat "$2" >>"$FAKE_LOG"
+printf 'NFT_END_%s\n' "$count" >>"$FAKE_LOG"
+[ "$FAKE_NFT_FAIL_CALL" -ne "$count" ]
+""",
+    )
+    _write_executable(
+        fake_bin / "dnsmasq",
+        """#!/bin/sh
+printf 'dnsmasq %s\n' "$*" >>"$FAKE_LOG"
+if [ "$1" = --version ]; then
+    printf 'dnsmasq nftset\n'
+    exit 0
+fi
+[ "$FAKE_DNSMASQ_TEST_FAILS" -eq 0 ]
+""",
+    )
+    _write_executable(
+        fake_bin / "install",
+        """#!/bin/sh
+printf 'install %s\n' "$*" >>"$FAKE_LOG"
+[ "$1" != -d ] || exit 0
+source=""
+destination=""
+for argument in "$@"; do
+    source="$destination"
+    destination="$argument"
+done
+[ "$destination" != "$FAKE_INSTALL_FAIL_DESTINATION" ] || exit 73
+case "$destination" in
+    /usr/local/sbin/glupta-egress-apply)
+        cp "$source" "$FAKE_STATE/installed-script"
+        chmod 0755 "$FAKE_STATE/installed-script"
+        ;;
+    /etc/systemd/system/glupta-egress.service)
+        cp "$source" "$FAKE_STATE/service-unit"
+        ;;
+    /etc/systemd/system/*/90-glupta-egress.conf)
+        cp "$source" "$FAKE_STATE/dropin-unit"
+        ;;
+esac
+""",
+    )
+    _write_executable(
+        fake_bin / "systemctl",
+        """#!/bin/sh
+printf 'systemctl %s\n' "$*" >>"$FAKE_LOG"
+if [ "$1:$2" = restart:glupta-egress.service ]; then
+    /bin/sh "$FAKE_STATE/installed-script" --apply
+fi
+""",
+    )
+    _write_executable(
+        fake_bin / "sudo",
+        "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >>\"$FAKE_LOG\"\nexit 77\n",
+    )
+
+    env = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "FAKE_STATE": str(state),
+        "FAKE_LOG": str(log),
+        "FAKE_NFT_FAIL_CALL": str(nft_fail_call),
+        "FAKE_DNSMASQ_TEST_FAILS": "1" if dnsmasq_test_fails else "0",
+        "FAKE_INSTALL_FAIL_DESTINATION": install_fail_destination,
+    }
+    completed = subprocess.run(  # noqa: S603
+        ["/bin/sh", str(rendered)],
+        check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return completed, log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+def test_system_provision_rejects_non_root_even_when_sudo_fails(tmp_path: Path) -> None:
+    completed, log = _run_template(tmp_path, uid=501)
+
+    assert completed.returncode != 0
+    assert log == ""
+
+
+def test_system_provision_fails_closed_if_initial_nft_apply_fails(tmp_path: Path) -> None:
+    completed, log = _run_template(tmp_path, nft_fail_call=1)
+
+    assert completed.returncode != 0
+    assert log.count("NFT_CALL_") == 1
+    assert "ip saddr 172.30.47.2 reject" in log
+    assert "dnsmasq " not in log
+    assert "systemctl mask --now docker.service docker.socket containerd.service" in log
+    assert "systemctl unmask" not in log
+
+
+def test_interruption_after_persistent_mask_leaves_future_boot_closed(
+    tmp_path: Path,
+) -> None:
+    completed, log = _run_template(
+        tmp_path, install_fail_destination="/usr/local/sbin/glupta-egress-apply"
+    )
+
+    assert completed.returncode == 73
+    assert "systemctl mask --now docker.service docker.socket containerd.service" in log
+    assert "systemctl unmask" not in log
+    assert "/etc/systemd/system/glupta-egress.service" not in log
+    assert "NFT_CALL_" not in log
+
+
+def test_system_provision_leaves_failsafe_after_later_failure(tmp_path: Path) -> None:
+    completed, log = _run_template(tmp_path, dnsmasq_test_fails=True)
+
+    assert completed.returncode != 0
+    assert log.count("NFT_CALL_") == 1
+    assert "ip saddr 172.30.47.2 reject" in log
+    assert "ip daddr @codex4" not in log
+    assert "systemctl mask --now docker.service docker.socket containerd.service" in log
+    assert "systemctl unmask" not in log
+
+
+def test_system_provision_replaces_failsafe_only_on_success(tmp_path: Path) -> None:
+    completed, log = _run_template(tmp_path)
+
+    assert completed.returncode == 0
+    assert log.count("NFT_CALL_") == 2
+    assert "ip saddr 172.30.47.2 reject" in log
+    assert "ip daddr 172.30.47.3 tcp dport 5432 accept" in log
+    assert "ip daddr @codex4 tcp dport 443 accept" in log
+    assert "systemctl restart dnsmasq" in log
+    assert "systemctl is-active --quiet dnsmasq" in log
+    assert "systemctl stop" not in log
+    assert "systemctl mask --now docker.service docker.socket containerd.service" in log
+    assert "systemctl unmask docker.service docker.socket containerd.service" in log
+    assert "sudo " not in log
+
+
+def test_system_provision_installs_durable_runtime_ordering(tmp_path: Path) -> None:
+    completed, log = _run_template(tmp_path)
+
+    assert completed.returncode == 0
+    state = tmp_path / "state"
+    installed_script = (state / "installed-script").read_text(encoding="utf-8")
+    service = (state / "service-unit").read_text(encoding="utf-8")
+    dropin = (state / "dropin-unit").read_text(encoding="utf-8")
+    assert installed_script == render_colima._script(TEMPLATE)
+    assert "Before=docker.service docker.socket containerd.service" in service
+    assert "ExecStart=/usr/local/sbin/glupta-egress-apply --apply" in service
+    assert "Type=oneshot" in service
+    assert "RemainAfterExit=yes" in service
+    assert "WantedBy=multi-user.target" in service
+    assert "Requires=glupta-egress.service" in dropin
+    assert "After=glupta-egress.service" in dropin
+    for unit in ("docker.service", "docker.socket", "containerd.service"):
+        assert f"/etc/systemd/system/{unit}.d/90-glupta-egress.conf" in log
+    assert log.index("systemctl restart glupta-egress.service") < log.index("NFT_CALL_1")
+    assert log.index("systemctl is-active --quiet glupta-egress.service") < log.index(
+        "systemctl unmask docker.service"
+    )
+
+    required = {
+        dependency
+        for line in dropin.splitlines()
+        if line.startswith("Requires=")
+        for dependency in line.removeprefix("Requires=").split()
+    }
+    ordered_after = {
+        dependency
+        for line in dropin.splitlines()
+        if line.startswith("After=")
+        for dependency in line.removeprefix("After=").split()
+    }
+    failed_jobs = {"glupta-egress.service"}
+    for runtime in ("docker.service", "docker.socket", "containerd.service"):
+        # systemd.unit: an activated unit is not started when a Requires= target
+        # fails activation and the dependent is ordered After= that target.
+        runtime_started = not bool(required & ordered_after & failed_jobs)
+        assert not runtime_started, runtime
+
+
 def test_shell_template_is_syntax_checked_and_fail_closed() -> None:
     subprocess.run(["/bin/sh", "-n", str(TEMPLATE)], check=True)  # noqa: S603
     script = TEMPLATE.read_text(encoding="utf-8")
@@ -400,5 +693,8 @@ def test_shell_template_is_syntax_checked_and_fail_closed() -> None:
     assert "ip daddr 172.30.47.3 tcp dport 5432 accept" in script
     assert "ip daddr @codex4 tcp dport 443 accept" in script
     assert "counter name glupta_denied reject" in script
-    assert "systemctl stop docker.service docker.socket containerd.service" in script
+    assert "systemctl stop docker.service docker.socket containerd.service" not in script
+    assert "Requires=glupta-egress.service" in script
+    assert "After=glupta-egress.service" in script
+    assert "sudo " not in script
     assert all(term not in script.lower() for term in ("curl ", "wget ", "proxy", "sidecar"))
