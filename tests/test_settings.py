@@ -13,6 +13,32 @@ from glupta_agi.settings import Settings, SettingsError, get_settings
 from tests.helpers import private_file, release_profile, write_profile
 
 
+def _assert_product_exception_sanitized(error: BaseException, *markers: str) -> None:
+    case = unittest.TestCase()
+    current: BaseException | None = error
+    while current is not None:
+        for marker in markers:
+            case.assertNotIn(marker, str(current))
+            case.assertNotIn(marker, repr(vars(current)))
+            case.assertNotIn(marker, "".join(traceback.format_exception(current)))
+        case.assertIsNone(current.__cause__)
+        case.assertIsNone(current.__context__)
+        captured = traceback.TracebackException.from_exception(current, capture_locals=True)
+        traceback_cursor = current.__traceback__
+        while traceback_cursor is not None:
+            frame = traceback_cursor.tb_frame
+            if "/src/glupta_agi/" in frame.f_code.co_filename:
+                captured_frame = next(
+                    item for item in captured.stack if item.filename == frame.f_code.co_filename
+                    and item.lineno == traceback_cursor.tb_lineno
+                )
+                for marker in markers:
+                    case.assertNotIn(marker, repr(frame.f_locals))
+                    case.assertNotIn(marker, repr(captured_frame.locals))
+            traceback_cursor = traceback_cursor.tb_next
+        current = current.__cause__ or current.__context__
+
+
 class SettingsTests(unittest.TestCase):
     def test_every_release_profile_field_is_required_and_frozen_policy_cannot_drift(self) -> None:
         raw = release_profile().model_dump(mode="json")
@@ -73,7 +99,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(settings.authenticates("t" * 32))
             self.assertEqual(settings.model, PINNED_MODEL)
             self.assertEqual(settings.release_profile_digest, release_profile().digest())
-            self.assertEqual(opened, [token, profile_path])
+            self.assertEqual(opened, [profile_path, token])
 
     def test_missing_unsafe_or_expired_release_evidence_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -187,6 +213,96 @@ class SettingsTests(unittest.TestCase):
                     self.assertRaisesRegex(SettingsError, "generation"),
                 ):
                     Settings.from_environment()
+
+    def test_private_file_and_configuration_rejections_release_secret_locals(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_path = write_profile(root)
+            key = private_file(root, "api-key", "synthetic-key-material")
+            base = {
+                "GLUPTA_RELEASE_PROFILE_FILE": str(profile_path),
+                "GLUPTA_OPENAI_API_KEY_FILE": str(key),
+                "GLUPTA_CREDENTIAL_GENERATION": "1",
+            }
+            for name, value, marker in (
+                ("short-token", "R10_SHORT_TOKEN", "R10_SHORT_TOKEN"),
+                ("oversized-token", "R10_PRIVATE_VALUE" + "x" * 4097, "R10_PRIVATE_VALUE"),
+            ):
+                token = private_file(root, name, value)
+                with (
+                    self.subTest(path=name),
+                    patch.dict(
+                        os.environ, {**base, "GLUPTA_INTAKE_TOKEN_FILE": str(token)}, clear=True
+                    ),
+                    self.assertRaises(SettingsError) as caught,
+                ):
+                    Settings.from_environment()
+                _assert_product_exception_sanitized(caught.exception, marker)
+
+            token_marker = "R10_VALID_TOKEN_" + "t" * 32
+            token = private_file(root, "valid-marked-token", token_marker)
+            real_open = os.open
+            opened: list[Path] = []
+
+            def observe(path: object, flags: int, *args: object, **kwargs: object) -> int:
+                opened.append(Path(path))
+                return real_open(path, flags, *args, **kwargs)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {**base, "GLUPTA_INTAKE_TOKEN_FILE": str(token),
+                     "GLUPTA_CREDENTIAL_GENERATION": "2"},
+                    clear=True,
+                ),
+                patch("glupta_agi.settings.os.open", side_effect=observe),
+                self.assertRaises(SettingsError) as caught,
+            ):
+                Settings.from_environment()
+            self.assertEqual(opened, [profile_path])
+            _assert_product_exception_sanitized(caught.exception, token_marker)
+
+            database_marker = "R10_DATABASE_MARKER"
+            password = private_file(root, "postgres-password", database_marker)
+            with (
+                patch.dict(
+                    os.environ,
+                    {"GLUPTA_POSTGRES_PASSWORD_FILE": str(password),
+                     "GLUPTA_POSTGRES_HOST": "remote.invalid"},
+                    clear=True,
+                ),
+                patch("glupta_agi.settings.os.open") as private_open,
+                self.assertRaises(SettingsError) as caught,
+            ):
+                Settings.dbos_system_database_url()
+            private_open.assert_not_called()
+            _assert_product_exception_sanitized(caught.exception, database_marker)
+
+            oversized_password = private_file(
+                root, "oversized-postgres-password", database_marker + "p" * 512
+            )
+            with (
+                patch.dict(
+                    os.environ, {"GLUPTA_POSTGRES_PASSWORD_FILE": str(oversized_password)},
+                    clear=True,
+                ),
+                self.assertRaises(SettingsError) as caught,
+            ):
+                Settings.dbos_system_database_url()
+            _assert_product_exception_sanitized(caught.exception, database_marker)
+
+            explicit_marker = "R10_EXPLICIT_PASSWORD"
+            with (
+                patch.dict(
+                    os.environ,
+                    {"DBOS_SYSTEM_DATABASE_URL":
+                     f"postgresql://user:{explicit_marker}@remote.invalid/database"},
+                    clear=True,
+                ),
+                self.assertRaises(SettingsError) as caught,
+            ):
+                Settings.dbos_system_database_url()
+            _assert_product_exception_sanitized(caught.exception, explicit_marker)
 
     def test_database_must_be_local_postgresql(self) -> None:
         settings = Settings(input_root=Path("/inputs"), token="t" * 32)
