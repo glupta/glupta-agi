@@ -53,6 +53,10 @@ def _dispatch(body: dict[str, object], **overrides: object) -> FrozenDispatch:
         "request_digest": "a" * 64,
         "request_body_digest": canonical_digest(body),
         "release_profile_digest": profile.digest(),
+        "region": profile.region,
+        "endpoint": profile.endpoint,
+        "price_schedule_id": profile.price_schedule_id,
+        "price_schedule_digest": profile.price_schedule_digest,
         "disclosure_profile": profile.disclosure_profile,
         "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
         "external_disclosure_ack": True,
@@ -166,7 +170,7 @@ def test_exact_supported_api_request_uses_zero_retries_and_private_key() -> None
     case.assertEqual(result.brief.answer, "Grounded.")
     case.assertEqual(result.audit.reasoning_tokens, 5)
     case.assertEqual(constructed["api_key"], "secret-api-key-" + "x" * 32)
-    case.assertEqual(constructed["base_url"], "https://api.openai.com/v1")
+    case.assertEqual(constructed["base_url"], "https://us.api.openai.com/v1")
     case.assertEqual(constructed["max_retries"], 0)
     case.assertEqual(constructed["organization"], "")
     case.assertEqual(constructed["project"], "proj_crawl")
@@ -213,7 +217,7 @@ def test_official_sdk_wire_headers_are_bound_to_file_key_and_approved_project() 
             )
     headers = captured["headers"]
     case = TestCase()
-    case.assertEqual(captured["url"], "https://api.openai.com/v1/responses")
+    case.assertEqual(captured["url"], "https://us.api.openai.com/v1/responses")
     case.assertEqual(headers["authorization"], "Bearer file-api-key-" + "x" * 32)
     case.assertEqual(headers["openai-project"], "proj_crawl")
     case.assertNotIn("openai-organization", headers)

@@ -1,5 +1,9 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca AS build
+FROM ghcr.io/astral-sh/uv:0.12.4@sha256:d0a6eca6c669dc7e9c51218707b8438a3d30402733d739dcc00adb3e213e8f5c AS uv
 
+FROM cgr.dev/chainguard/python:latest-dev@sha256:91418fa26adfd56d959d80e5da0d7470b5653e4f00ba698ef5d8212e58e3f7f8 AS build
+
+USER root
+COPY --from=uv /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
@@ -8,12 +12,11 @@ RUN uv sync --frozen --no-dev --no-install-project \
     && uv build --wheel --out-dir /dist \
     && uv pip install --python /app/.venv --no-deps /dist/*.whl
 
-FROM python:3.13-slim-bookworm@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1
+FROM cgr.dev/chainguard/python:latest@sha256:6d71f8dbd199350964ce8b10d50fb9d4d8e2bd50316f3a1821dbdc6eef5252fb
 
-RUN groupadd --gid 10001 glupta \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent glupta
 WORKDIR /app
-COPY --from=build --chown=10001:10001 /app/.venv /app/.venv
+COPY --from=build --chown=65532:65532 /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1
-USER 10001:10001
-CMD ["glupta-agi"]
+USER 65532:65532
+ENTRYPOINT ["/app/.venv/bin/python"]
+CMD ["-m", "glupta_agi"]

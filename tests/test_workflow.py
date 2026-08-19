@@ -90,6 +90,10 @@ def _audit(**overrides: object) -> ProviderAudit:
         "workflow_id": _WORKFLOW_ID,
         "request_digest": _REQUEST_DIGEST,
         "release_profile_digest": release_profile().digest(),
+        "region": "us",
+        "endpoint": "https://us.api.openai.com/v1",
+        "price_schedule_id": release_profile().price_schedule_id,
+        "price_schedule_digest": release_profile().price_schedule_digest,
         "client_request_id": "0198be50-0000-7000-8000-000000000000",
         "provider_request_id": "req_1",
         "response_id": "resp_1",
@@ -103,7 +107,7 @@ def _audit(**overrides: object) -> ProviderAudit:
         "output_tokens": 20,
         "reasoning_tokens": 5,
         "total_tokens": 120,
-        "cost_upper_bound_micros": 1_225,
+        "cost_upper_bound_micros": 1_348,
         "request_body_digest": "b" * 64,
         "output_digest": "c" * 64,
         "validated_result_digest": "d" * 64,
@@ -266,7 +270,7 @@ class WorkflowTests(unittest.TestCase):
             result, usage = _run(_packet(), adapter_factory=factory)
         self.assertEqual(result.brief.answer, "Grounded.")
         self.assertEqual(usage.output_tokens, 20)
-        self.assertEqual(usage.details["cost_upper_bound_micros"], 1_225)
+        self.assertEqual(usage.details["cost_upper_bound_micros"], 1_348)
         factory.assert_not_called()
 
     def test_initial_and_replay_public_results_return_identical_bound_audit(self) -> None:
@@ -298,7 +302,7 @@ class WorkflowTests(unittest.TestCase):
             ]
         self.assertEqual(responses[0], responses[1])
         self.assertEqual(responses[0]["provider_audit"]["provider_request_id"], "req_1")
-        self.assertEqual(responses[0]["provider_audit"]["cost_upper_bound_micros"], 1_225)
+        self.assertEqual(responses[0]["provider_audit"]["cost_upper_bound_micros"], 1_348)
 
     def test_public_workflow_exception_drops_admitted_payload_traceback_locals(self) -> None:
         marker = "RAW_ADMITTED_SOURCE_BYTES"
@@ -627,7 +631,7 @@ class WorkflowTests(unittest.TestCase):
         _assert_product_frames_sanitized(caught.exception, sentinel, source_marker)
 
     def test_retryable_provider_status_routes_to_sticky_unknown(self) -> None:
-        request = Request("POST", "https://api.openai.com/v1/responses")
+        request = Request("POST", "https://us.api.openai.com/v1/responses")
         response = Response(429, request=request, headers={"x-request-id": "req_unknown"})
         status_error = APIStatusError(
             "RAW_PROVIDER_MARKER", response=response, body={"secret": "marker"}

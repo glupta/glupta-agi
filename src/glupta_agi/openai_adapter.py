@@ -1,5 +1,3 @@
-"""Official OpenAI Responses API edge for the Crawl inference port."""
-
 from __future__ import annotations
 
 import asyncio
@@ -66,6 +64,10 @@ def _read_api_key(path: Path, expected_sha256: str) -> str:
     return key
 
 
+def validate_api_key(path: Path, expected_sha256: str) -> None:
+    _read_api_key(path, expected_sha256)
+
+
 class OpenAIResponsesAdapter:
     def __init__(self, profile: ReleaseProfile, credential_file: Path, *,
         credential_generation: int, client_factory: Callable[..., Any] = AsyncOpenAI) -> None:
@@ -92,8 +94,8 @@ class OpenAIResponsesAdapter:
             raise AdapterError("release profile changed after effect reservation")
         if dispatch.request_body_digest != contracts.canonical_digest(request_body) or request_body.get("service_tier") != dispatch.service_tier:  # noqa: E501
             raise AdapterError("provider request changed after effect reservation")
-        expected_identity = (self.profile.disclosure_profile, contracts.DISCLOSURE_NOTICE_DIGEST, True, self.profile.service_tier, self.profile.project_id, self.profile.service_account_id, self.profile.api_key_id, self.credential_generation)  # noqa: E501
-        observed_identity = (dispatch.disclosure_profile, dispatch.disclosure_notice_digest, dispatch.external_disclosure_ack, dispatch.service_tier, dispatch.project_id, dispatch.service_account_id, dispatch.api_key_id, dispatch.credential_generation)  # noqa: E501
+        expected_identity = (self.profile.disclosure_profile, contracts.DISCLOSURE_NOTICE_DIGEST, True, self.profile.service_tier, self.profile.project_id, self.profile.service_account_id, self.profile.api_key_id, self.credential_generation, self.profile.region, self.profile.endpoint, self.profile.price_schedule_id, self.profile.price_schedule_digest)  # noqa: E501
+        observed_identity = (dispatch.disclosure_profile, dispatch.disclosure_notice_digest, dispatch.external_disclosure_ack, dispatch.service_tier, dispatch.project_id, dispatch.service_account_id, dispatch.api_key_id, dispatch.credential_generation, dispatch.region, dispatch.endpoint, dispatch.price_schedule_id, dispatch.price_schedule_digest)  # noqa: E501
         if observed_identity != expected_identity or self.credential_generation != self.profile.credential_generation:  # noqa: E501
             raise AdapterError("provider identity changed after effect reservation")
         if any(name.startswith("OPENAI_") for name in os.environ):
@@ -170,6 +172,8 @@ class OpenAIResponsesAdapter:
         audit = contracts.ProviderAudit(
             workflow_id=dispatch.workflow_id, request_digest=dispatch.request_digest,
             release_profile_digest=dispatch.release_profile_digest,
+            region=dispatch.region, endpoint=dispatch.endpoint, price_schedule_id=dispatch.price_schedule_id,  # noqa: E501
+            price_schedule_digest=dispatch.price_schedule_digest,
             client_request_id=client_request_id, provider_request_id=request_id,
             response_id=response_id, requested_model=dispatch.model,
             returned_model=returned_model, service_tier=service_tier, status=status, input_tokens=input_tokens,  # noqa: E501

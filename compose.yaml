@@ -2,9 +2,10 @@ name: glupta-crawl
 
 services:
   app:
+    image: glupta-crawl:0.3.1
     build: .
     restart: unless-stopped
-    user: "${GLUPTA_UID:?set GLUPTA_UID}:${GLUPTA_GID:?set GLUPTA_GID}"
+    user: "65532:65532"
     environment:
       GLUPTA_INPUT_ROOT: /data/inputs
       GLUPTA_INTAKE_TOKEN_FILE: /run/private/intake-token
@@ -23,23 +24,15 @@ services:
     mem_limit: 512m
     cpus: 1.0
     tmpfs:
-      - "/tmp:rw,noexec,nosuid,nodev,size=67108864,uid=${GLUPTA_UID},gid=${GLUPTA_GID},mode=0700"
+      - "/tmp:rw,noexec,nosuid,nodev,size=67108864,uid=65532,gid=65532,mode=0700"
     volumes:
       - ${GLUPTA_INPUT_DIR:-./inputs}:/data/inputs:ro
-      - ${GLUPTA_RUNTIME_DIR:-./runtime}/intake-token:/run/private/intake-token:ro
-      - ${GLUPTA_RUNTIME_DIR:-./runtime}/postgres-password:/run/private/postgres-password:ro
-      - type: bind
-        source: ${GLUPTA_RELEASE_PROFILE_FILE:?set GLUPTA_RELEASE_PROFILE_FILE}
-        target: /run/private/release-profile.json
+      - type: volume
+        source: app-private
+        target: /run/private
         read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${GLUPTA_OPENAI_API_KEY_FILE:?set GLUPTA_OPENAI_API_KEY_FILE}
-        target: /run/private/openai-api-key
-        read_only: true
-        bind:
-          create_host_path: false
+        volume:
+          nocopy: true
     ports:
       - 127.0.0.1:${GLUPTA_PORT:-8765}:8080
     depends_on:
@@ -48,7 +41,7 @@ services:
     healthcheck:
       test:
         - CMD
-        - python
+        - /app/.venv/bin/python
         - -c
         - >-
           import urllib.request;
@@ -57,7 +50,8 @@ services:
       timeout: 3s
       retries: 20
     networks:
-      - private
+      private:
+        ipv4_address: 172.30.47.2
 
   postgres:
     image: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
@@ -69,25 +63,36 @@ services:
     environment:
       POSTGRES_DB: glupta
       POSTGRES_USER: glupta
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
-    secrets:
-      - postgres-password
+      POSTGRES_PASSWORD_FILE: /run/private/postgres-password
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - type: volume
+        source: postgres-private
+        target: /run/private
+        read_only: true
+        volume:
+          nocopy: true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U glupta -d glupta"]
       interval: 3s
       timeout: 3s
       retries: 20
     networks:
-      - private
-
-secrets:
-  postgres-password:
-    file: ${GLUPTA_RUNTIME_DIR:-./runtime}/postgres-password
+      private:
+        ipv4_address: 172.30.47.3
 
 volumes:
   postgres-data:
+  app-private:
+    external: true
+    name: ${GLUPTA_APP_PRIVATE_VOLUME:?stage an immutable app private volume}
+  postgres-private:
+    external: true
+    name: ${GLUPTA_POSTGRES_PRIVATE_VOLUME:?stage an immutable PostgreSQL private volume}
 
 networks:
   private:
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.30.47.0/29
