@@ -112,6 +112,29 @@ bundle supplied to its short-lived process by the approved local broker. Codex
 subscription-volume provisioning and rotation are a separate deployment gate;
 the application never reads or prints the auth file itself.
 
+Provision the Codex volume only through the official Codex login flow directly
+into a newly labeled Docker volume; never copy a host `auth.json`. Before the
+volume can be named in Compose, attest it offline against the exact local image:
+
+```sh
+python3 scripts/attest_codex_subscription_volume.py \
+  --volume glupta-codex-subscription-g<generation>-<32-hex-nonce> \
+  --generation <generation> \
+  --image-id sha256:<exact-local-image-id>
+```
+
+The volume must carry `com.glupta.private=true`,
+`com.glupta.purpose=codex-subscription`, and the matching
+`com.glupta.generation` label. The attestor runs the exact image with no network,
+a read-only root, no capabilities, and the volume mounted read-only. It reads
+only filesystem metadata and the top-level filename inventory: `/run/codex`
+must be owned by UID 65532 at mode `0700`, and its only entry must be a regular
+UID-65532 mode-`0600` `auth.json`. It never reads authentication bytes or proves
+the account/plan. Account identity, live route egress, and official-login
+rotation remain independent deployment gates.
+The receipt is point-in-time metadata evidence: re-run it against the same
+volume and image immediately before the separately approved Compose start.
+
 After every independent gate is satisfied, the operator supplies only opaque
 generation and volume/image references to Compose:
 
