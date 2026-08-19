@@ -199,6 +199,10 @@ def _provision_span(candidate: str) -> tuple[int, int, str] | None:
     return declaration.start(), end, candidate[declaration.start() : end]
 
 
+def _provision_comparison_text(provision_text: str) -> str:
+    return provision_text.rstrip("\n") + "\n"
+
+
 def verify_text(candidate: str, repo: Path, template: Path) -> None:
     _validate_contract(repo)
     expected = _block(template)
@@ -207,6 +211,7 @@ def verify_text(candidate: str, repo: Path, template: Path) -> None:
     if provision is None:
         raise RenderError("rendered Colima egress block is not exact")
     _, _, provision_text = provision
+    provision_text = _provision_comparison_text(provision_text)
     marked_exact = provision_text == expected
     normalized_exact = provision_text == normalized
     if not (marked_exact or normalized_exact):
@@ -228,6 +233,7 @@ def render(config: Path, output: Path, repo: Path, template: Path) -> None:
     if provision is None:
         raise RenderError("refusing to replace an unowned or ambiguous provision block")
     start, end, provision_text = provision
+    provision_text = _provision_comparison_text(provision_text)
     if provision_text not in ("provision: null\n", replacement, normalized):
         raise RenderError("refusing to replace an unowned or ambiguous provision block")
     if provision_text == replacement and current.count(BEGIN) == current.count(END) == 1:
