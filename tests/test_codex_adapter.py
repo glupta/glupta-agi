@@ -1,4 +1,4 @@
-# ruff: noqa: S101
+# ruff: noqa: S101,S108
 from __future__ import annotations
 
 import asyncio
@@ -24,6 +24,7 @@ from glupta_agi.codex_adapter import (
     CodexSubscriptionAdapter,
     ProviderAmbiguousError,
     ProviderRejectedError,
+    _launch_args,
 )
 from glupta_agi.inference import FrozenDispatch
 from tests.helpers import release_profile
@@ -147,6 +148,48 @@ def test_exact_subscription_account_and_native_safety_controls() -> None:
     assert kwargs["output_schema"] == contracts.EvidenceBrief.model_json_schema()
     assert phases == ["account_lookup_started", "model_catalog_started",
         "thread_start_started", "turn_invocation_started", "turn_returned"]
+
+
+def test_clean_launcher_uses_only_env_i_and_explicit_runtime_state() -> None:
+    with (
+        patch("glupta_agi.codex_adapter.shutil.which", return_value="/usr/bin/env") as which,
+        patch("glupta_agi.codex_adapter.bundled_path_dir", return_value=None),
+        patch("glupta_agi.codex_adapter.bundled_codex_path", return_value=Path("/codex")),
+        patch.dict(os.environ, {"UNAPPROVED_AMBIENT": "must-not-pass"}, clear=True),
+    ):
+        args = _launch_args(Path("/private/codex"), Path("/tmp/state"))
+
+    which.assert_called_once_with("env", path=os.defpath)
+    assert args[:2] == ("/usr/bin/env", "-i")
+    assert f"PATH={os.defpath}" in args
+    assert "CODEX_HOME=/private/codex" in args
+    assert "UNAPPROVED_AMBIENT=must-not-pass" not in args
+    assert args[-2:] == ("--listen", "stdio://")
+
+
+def test_missing_clean_launcher_fails_before_sdk_construction() -> None:
+    constructed = False
+
+    def factory(_: object) -> object:
+        nonlocal constructed
+        constructed = True
+        raise AssertionError
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("glupta_agi.codex_adapter.shutil.which", return_value=None),
+        pytest.raises(AdapterError, match="clean Codex environment launcher is unavailable"),
+    ):
+        asyncio.run(
+            CodexSubscriptionAdapter(
+                release_profile(),
+                Path("/private/codex"),
+                auth_generation=1,
+                phase_recorder=lambda _phase: None,
+                client_factory=factory,
+            ).generate(_dispatch(), _body())
+        )
+    assert constructed is False
 
 
 @pytest.mark.parametrize("ambient", ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"])

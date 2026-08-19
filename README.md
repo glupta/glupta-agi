@@ -9,18 +9,37 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Version `0.4.2` is a **deployment- and dispatch-held candidate**, not a running
+Version `0.4.3` is a **deployment- and dispatch-held candidate**, not a running
 production release. Crawl adopts the official `openai-codex` SDK and its pinned
 Codex runtime, authenticated by an approved ChatGPT subscription. It does not
 accept an OpenAI API key, project, service account, metered API route, or USD
 budget.
 
-The 0.4.2 candidate removes Crawl's Pydantic AI `FunctionModel` translation
+The 0.4.2 candidate removed Crawl's Pydantic AI `FunctionModel` translation
 bridge. The single native Codex turn now runs inside one named DBOS step with
 retries disabled. Pydantic still owns typed contracts and Pydantic Evals remains
 the offline evaluation primitive. The component-by-component evidence and
 deferred alternatives are recorded in
 [`docs/component-market-review-2026-08-19.md`](docs/component-market-review-2026-08-19.md).
+
+The 0.4.3 runtime adds only the standalone GNU coreutils `env` executable from
+the digest-pinned Debian Bookworm image, with its GPL-3+ copyright and license
+files. The Chainguard runtime does not provide an executable `env` on Python's
+default search path, while the official SDK's environment overlay cannot clear
+ambient state. Chainguard coreutils is not anonymously available, Wolfi
+coreutils is a larger multicall binary with extra runtime libraries, and
+BusyBox would reintroduce a shell applet. The dedicated 68 KiB Debian binary
+therefore preserves the required `env -i` boundary without a launcher, shell,
+service, or Python dependency.
+
+The source-stage package is Debian `coreutils 9.1-1`; its corresponding source
+is Debian's `coreutils_9.1.orig.tar.xz` plus `coreutils_9.1-1.debian.tar.xz` in
+the Bookworm archive. Final-image package scanners do not attribute the copied
+binary because the Debian package database is intentionally not copied. Do not
+claim a coreutils SBOM component from the final image alone: bind the source
+image digest, package/version, executable SHA-256 and glibc-only ELF dependency,
+and the copied copyright/GPL-3 text in release evidence. Any distribution must
+also make the corresponding GPL source available.
 
 Candidate controls:
 
@@ -76,6 +95,13 @@ model dispatch and remains independently gated.
 uv run --frozen --extra dev ruff check .
 uv run --frozen --extra dev python -m pytest -q
 uv lock --check --offline
+```
+
+The built-image contract is opt-in and never authenticates or starts a turn:
+
+```sh
+GLUPTA_RUNTIME_IMAGE=<local-built-image> \
+  uv run --frozen --extra dev python -m pytest -q tests/test_runtime_image.py
 ```
 
 ## Held deployment contract
