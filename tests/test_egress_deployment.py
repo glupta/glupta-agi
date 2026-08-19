@@ -81,6 +81,22 @@ def test_render_replaces_only_its_exact_prior_block(tmp_path: Path) -> None:
     assert first.read_bytes() == updated.read_bytes()
 
 
+def test_render_accepts_colima_null_with_blank_separator(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        "arch: aarch64\nprovision: null\n\n# Next setting.\nruntime: docker\n",
+    )
+    candidate = tmp_path / "candidate.yaml"
+
+    render_colima.render(config, candidate, ROOT, TEMPLATE)
+
+    rendered = candidate.read_text(encoding="utf-8")
+    assert rendered.count("GLUPTA_EGRESS_BEGIN") == 1
+    assert rendered.count("GLUPTA_EGRESS_END") == 1
+    assert "GLUPTA_EGRESS_END\n# Next setting.\nruntime: docker\n" in rendered
+    render_colima.verify_text(rendered, ROOT, TEMPLATE)
+
+
 def test_verify_and_render_accept_colima_marker_normalization(tmp_path: Path) -> None:
     marked, updated = tmp_path / "marked.yaml", tmp_path / "updated.yaml"
     render_colima.render(_config(tmp_path), marked, ROOT, TEMPLATE)
@@ -95,6 +111,34 @@ def test_verify_and_render_accept_colima_marker_normalization(tmp_path: Path) ->
     render_colima.render(active, updated, ROOT, TEMPLATE)
 
     assert updated.read_bytes() == marked.read_bytes()
+
+
+@pytest.mark.parametrize("form", ("marked", "normalized"))
+def test_verify_and_render_accept_owned_block_with_blank_separator(
+    tmp_path: Path, form: str
+) -> None:
+    marked, updated = tmp_path / "marked.yaml", tmp_path / "updated.yaml"
+    render_colima.render(_config(tmp_path), marked, ROOT, TEMPLATE)
+    text = marked.read_text(encoding="utf-8").replace(
+        "runtime: docker\n", "\n# Next setting.\nruntime: docker\n", 1
+    )
+    if form == "normalized":
+        text = "".join(
+            line
+            for line in text.splitlines(keepends=True)
+            if "GLUPTA_EGRESS_BEGIN" not in line
+            and "GLUPTA_EGRESS_END" not in line
+        )
+    active = _config(tmp_path, text)
+
+    render_colima.verify_text(text, ROOT, TEMPLATE)
+    render_colima.render(active, updated, ROOT, TEMPLATE)
+
+    rendered = updated.read_text(encoding="utf-8")
+    assert rendered.count("GLUPTA_EGRESS_BEGIN") == 1
+    assert rendered.count("GLUPTA_EGRESS_END") == 1
+    assert "GLUPTA_EGRESS_END\n# Next setting.\nruntime: docker\n" in rendered
+    render_colima.verify_text(rendered, ROOT, TEMPLATE)
 
 
 def test_normalized_owned_block_does_not_authorize_unrelated_provisioning(
