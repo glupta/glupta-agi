@@ -90,9 +90,38 @@ Do not start this candidate until these separate gates close:
 - isolated startup, restart, rollback, and no-provider rehearsals.
 
 The previous regional Responses-API firewall renderer was retired with that
-metered API architecture. It must not be reused to imply that the native Codex
-subscription route is constrained. Deployment remains held until the actual
-runtime endpoints and a proportional egress control are proven.
+metered API architecture. The native subscription route instead requires only
+the pinned Codex backend at `chatgpt.com` and managed token refresh at
+`auth.openai.com`. `deploy/egress/render_colima.py` prepares an exact Colima
+`after-boot` candidate that adopts the VM's maintained nftables and dnsmasq
+primitives: the app may reach PostgreSQL on TCP 5432 and DNS-resolved addresses
+for those two hosts on TCP 443; every other forwarded app packet is rejected.
+It does not add a proxy, sidecar, service, or custom daemon.
+
+The renderer validates the exact two-service Compose network identity, pinned
+Codex 0.147.0 dependency, clean-environment launch, disabled extension surface,
+and absence of an endpoint override before it writes a candidate. It never
+changes Colima or live firewall state:
+
+```sh
+python3 deploy/egress/render_colima.py render \
+  --config /Users/glupta/.colima/default/colima.yaml \
+  --repo "$PWD" \
+  --output /private/tmp/glupta-colima-candidate.yaml
+python3 deploy/egress/render_colima.py verify \
+  --config /private/tmp/glupta-colima-candidate.yaml \
+  --repo "$PWD"
+```
+
+Applying that candidate, restarting shared Colima, proving the policy after a
+reboot, and starting Compose remain separate deployment approvals. The
+DNS-derived nftables set is a proportional L3/L4 control, not TLS-hostname
+enforcement: dnsmasq also matches subdomains of the two owned domains, and a
+compromised process could reuse an allowed shared CDN address.
+That residual is accepted only with the exact immutable Crawl image, no tools,
+no web search, no apps/plugins, a read-only root, and the separately verified
+Codex runtime. A hostile-workload FQDN requirement would need an L7 gateway and
+would change the approved two-service architecture.
 
 The image reference is intentionally not embedded in Compose. An older signed
 Responses-API image remains historical evidence and cannot accidentally start
