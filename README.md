@@ -160,13 +160,20 @@ only filesystem metadata and exact filename inventories. `/run/codex` must be
 owned by UID 65532 at mode `0700` and contain exactly the official completed
 Codex 0.147.0 file-store login layout: a regular mode-`0600`, single-link
 `auth.json`; `log/codex-login.log`, also regular mode `0600` and single-link;
-and an empty mode-`0700` `tmp/arg0` directory. Every node must be owned by UID
-65532; the `log` and `tmp` directories must grant their owner full access and
-must have no special or group/world write bits. The attestor rejects incomplete
-pre-authentication state, stale arg0 sessions, symlinks, and any additional
-configuration or state. It records the umask-derived `log` and `tmp` modes but
-does not inspect file contents. It never reads authentication bytes or log
-bytes and does not prove the account/plan.
+and mode-`0700` `tmp/arg0`. Direct device login exits through the Codex CLI's
+immediate success path, so its one native arg0-helper directory remains after a
+normal exit. The directory name must match `codex-arg0[A-Za-z0-9]{6}`, be mode
+`0755`, and contain exactly a regular mode-`0644`, single-link `.lock` plus the
+four single-link symlinks `apply_patch`, `applypatch`, `codex-execve-wrapper`,
+and `codex-linux-sandbox`. Each symlink must target the exact bundled
+`/app/.venv/lib/python3.14/site-packages/codex_cli_bin/bin/codex` executable.
+Every node must be owned by UID 65532; the `log` and `tmp` directories must
+grant their owner full access and must have no special or group/world write
+bits. The attestor rejects incomplete pre-authentication state, zero or
+multiple arg0 sessions, alternate symlink targets, and any missing or
+additional configuration or state. It records inventories and modes only and
+does not prove the account/plan. It never reads authentication bytes or log
+bytes.
 Account identity, live route egress, and official-login rotation remain
 independent deployment gates.
 The receipt is point-in-time metadata evidence: re-run it against the same
