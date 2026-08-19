@@ -71,9 +71,12 @@ class ReleaseBoundaryTests(TestCase):
         self.assertIn("It never reads authentication bytes", readme)
         self.assertIn("Account identity, live route egress", readme)
         self.assertIn("point-in-time metadata evidence", readme)
+        self.assertIn("deploy/egress/render_colima.py", readme)
+        self.assertIn("chatgpt.com", readme)
+        self.assertIn("auth.openai.com", readme)
+        self.assertIn("It never changes Colima or live firewall state", normalized)
         self.assertNotIn("OpenAI Responses API edge", readme)
         self.assertNotIn("GLUPTA_CREDENTIAL_GENERATION", readme)
-        self.assertNotIn("deploy/egress/render_colima.py", readme)
 
     def test_production_semantic_line_budget_is_at_most_1500(self) -> None:
         lines = (
