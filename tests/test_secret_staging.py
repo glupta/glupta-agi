@@ -5,6 +5,7 @@ import json
 import subprocess
 import tarfile
 from contextlib import redirect_stdout
+from itertools import pairwise
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -59,7 +60,12 @@ def test_staging_streams_exact_private_files_without_child_environment_disclosur
             ("database-marker", "profile", "openai-key")))
         case.assertEqual(kwargs["env"], {"HOME": "/reviewed/home", "PATH": "/reviewed/bin"})
     app = _entries(calls[1][1]["input"])
-    case.assertIn("--interactive", calls[1][0])
+    extractor = calls[1][0]
+    option_pairs = set(pairwise(extractor))
+    case.assertIn("--interactive", extractor)
+    case.assertTrue({("--network", "none"), ("--security-opt", "no-new-privileges:true"),
+        ("--cap-drop", "ALL"), ("--cap-add", "CHOWN")} <= option_pairs)
+    case.assertEqual(extractor[-5:], ["-x", "-f", "-", "-C", "/target"])
     case.assertEqual(set(app), set(staging.APP_FILES))
     case.assertTrue(all(entry.uid == entry.gid == 65532 and entry.mode == 0o600
         for entry, _ in app.values()))
