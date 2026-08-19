@@ -1,0 +1,45 @@
+{
+  "verdict": "RESTART_REQUIRED",
+  "material_blockers": [
+    {
+      "summary": "Sensitive API-key and admitted-source bytes remain reachable through exception traceback frames and context chains, contradicting the frozen sanitization contract.",
+      "evidence": [
+        "Frozen contract item 5 forbids raw sensitive bytes in messages, causes, attributes, contexts, or tracebacks.",
+        "At product commit 78a3d5a745113a87a7bb862c0498a218b66abc9a, src/glupta_agi/openai_adapter.py:97 retains the key in `generate`; lines 107-134 retain the client and request body and then raise `ProviderAmbiguousError` from that same frame.",
+        "src/glupta_agi/workflow.py:112-170 retains the admitted packet and request body while converting adapter failures. The resulting `AmbiguousEffectError` retains `ProviderAmbiguousError` as `__context__`, despite context display suppression.",
+        "A read-only, no-network diagnostic using synthetic markers and the exact production functions returned: `final_capture_locals_contains_source=True`, `context_type=ProviderAmbiguousError`, `context_capture_locals_contains_key=True`, and `context_capture_locals_contains_source=True`. No real credential or source data was accessed.",
+        "tests/test_openai_adapter.py:124-129 and the workflow redaction tests inspect ordinary formatted tracebacks, which omit frame locals; they do not prove the stronger frozen traceback/context requirement."
+      ],
+      "defect_class": "production-code secret/admitted-payload traceback exposure and false sanitization closure claim",
+      "disposition": "Keep dispatch frozen. Repair the exception boundary separately so no escaping exception or context originates from frames retaining key, client, or admitted request bytes; add context-chain and capture-locals regression proof, freeze new exact identities, and restart review."
+    },
+    {
+      "summary": "The manifest-bound canonical Blueprint contradicts the R6 candidate identity by naming rejected R4 product commit 8efd3cc… as the current 0.3.0 candidate.",
+      "evidence": [
+        "blueprint/wiki/operations/debates/greenfield-agent-farm-architecture-v3/idea.md:3-4 identifies 8efd3cc1907a2887a6e6c3822b70e1fe0b350ade as the current amendment product; lines 59-74 classify that same commit as rejected R4, while lines 107-117 identify R6 as 78a3d5a745113a87a7bb862c0498a218b66abc9a.",
+        "blueprint/wiki/operations/stack.md:12-14 calls 8efd3cc… the current supported-adapter candidate; lines 62-76 record it as rejected R4, while lines 112-123 identify R6 as 78a3d5a….",
+        "The packet and control amendment bind R6 to product 78a3d5a745113a87a7bb862c0498a218b66abc9a. The Blueprint worktree was clean at exact commit efb212b1b2f657c0e915b7ff8a0577faa8489103, and both affected Blueprint blobs matched their manifest hashes."
+      ],
+      "defect_class": "canonical Blueprint internal inconsistency and false current-candidate identity",
+      "disposition": "Correct the two current-state identity statements while preserving the R4/R5 historical sections, freeze a new Blueprint identity and packet/manifest, and restart exact-candidate review."
+    }
+  ],
+  "non_blocking_findings": [
+    "Both supplied top-level SHA-256 values matched exactly. All 52 manifest entries—39 product, 11 control, and 2 Blueprint—matched their declared Git objects; all three candidate/base ancestry relationships were valid.",
+    "The R6 service-tier repair is present end to end: `service_tier=\"default\"` is bound through the release profile, frozen dispatch, request body/digest, response attestation, audit, effect validation, and replay. Missing or different returned tiers become ambiguous before a Standard-price audit is constructed.",
+    "The pinned OpenAI 2.45.0 SDK locally confirms that `default` selects standard pricing and that an explicitly requested tier is reported in the response. R5 remains preserved as rejected evidence; the R6 child commit adds only its immutable review artifacts.",
+    "Independent provider, account, release, deployment, dispatch, drain, stage, and authority gates remain held; none is treated as approval or as curing these blockers."
+  ],
+  "factual_corrections": [
+    "The current exact R6 product identity is 78a3d5a745113a87a7bb862c0498a218b66abc9a, not 8efd3cc1907a2887a6e6c3822b70e1fe0b350ade.",
+    "Safe exception text and ordinary `traceback.format_exception` output do not establish traceback sanitization: these exact exception objects retain the key and admitted request through frame locals and `__context__`."
+  ],
+  "foundation_disposition": {
+    "action": "repair",
+    "cost": "Bounded but mandatory production exception-boundary repair, two Blueprint identity corrections, regression proof, and complete candidate refreeze/review; no architectural rebuild is presently indicated.",
+    "risk": "Dispatch could expose API-key and selected-source bytes to traceback-local capture or error tooling, while canonical documents can direct operators or reviewers to a rejected product identity.",
+    "rollback": "Perform no operational rollback or in-audit remediation. Preserve exact R6 as rejected evidence, keep deployed 0.2.10 historical and non-rollback, and produce a newly hashed candidate.",
+    "dispatch_held": true
+  },
+  "confidence_and_uncertainty": "High confidence. Identity checks covered both top-level hashes and every manifest entry. The production defect was directly reproduced with synthetic data, without credentials, network access, provider calls, writes, or peer-review results. Write-producing suites were not rerun under the read-only boundary, but both blockers follow directly from the exact source and canonical evidence."
+}

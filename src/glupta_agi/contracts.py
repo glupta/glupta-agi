@@ -7,11 +7,9 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-DISCLOSURE_NOTICE = (
-    "The selected source bytes and question will be sent to the OpenAI Responses API."
-)
+DISCLOSURE_NOTICE = "The selected source bytes and question will be sent to the OpenAI Responses API."  # noqa: E501
 DISCLOSURE_NOTICE_DIGEST = hashlib.sha256(DISCLOSURE_NOTICE.encode()).hexdigest()
 
 
@@ -27,8 +25,8 @@ class EvidenceBriefRequest(BaseModel):
 class Citation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str
-    line_start: int = Field(ge=1)
-    line_end: int = Field(ge=1)
+    line_start: StrictInt = Field(ge=1)
+    line_end: StrictInt = Field(ge=1)
     quote: str = Field(min_length=1)
 
 
@@ -56,14 +54,15 @@ class ProviderAudit(BaseModel):
     response_id: str
     requested_model: str
     returned_model: str
+    service_tier: Literal["default"]
     status: str
-    input_tokens: int = Field(ge=0)
-    cached_input_tokens: int = Field(ge=0)
-    cache_write_input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
-    reasoning_tokens: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
-    cost_upper_bound_micros: int = Field(ge=0)
+    input_tokens: StrictInt = Field(ge=0)
+    cached_input_tokens: StrictInt = Field(ge=0)
+    cache_write_input_tokens: StrictInt = Field(ge=0)
+    output_tokens: StrictInt = Field(ge=0)
+    reasoning_tokens: StrictInt = Field(ge=0)
+    total_tokens: StrictInt = Field(ge=0)
+    cost_upper_bound_micros: StrictInt = Field(ge=0)
     request_body_digest: str
     output_digest: str
     validated_result_digest: str | None = None
@@ -84,12 +83,17 @@ class ProviderResult(BaseModel):
 
 
 def validate_provider_record(record: ProviderResult) -> ProviderResult:
+    from .inference import usd_upper_bound
+
     result_digest = canonical_digest(record.brief.model_dump(mode="json"))
-    if (
-        record.audit.validated_result_digest != result_digest
-        or record.audit.record_digest != provider_record_digest(record.brief, record.audit)
-        or record.audit.total_tokens != record.audit.input_tokens + record.audit.output_tokens
-    ):
+    audit = record.audit
+    if (audit.validated_result_digest != result_digest
+            or audit.record_digest != provider_record_digest(record.brief, audit)
+            or audit.total_tokens != audit.input_tokens + audit.output_tokens
+            or audit.cached_input_tokens + audit.cache_write_input_tokens > audit.input_tokens
+            or audit.reasoning_tokens > audit.output_tokens
+            or audit.cost_upper_bound_micros != usd_upper_bound(audit.input_tokens,
+                                                                 audit.output_tokens)):
         raise ValueError("provider result does not match its audit")
     return record
 
@@ -102,14 +106,11 @@ class EvidenceBriefResponse(EvidenceBrief):
 
     @model_validator(mode="after")
     def bound_provider_record(self) -> EvidenceBriefResponse:
-        brief = EvidenceBrief(
-            answer=self.answer, citations=self.citations,
-            uncertainties=self.uncertainties, next_decisions=self.next_decisions,
-        )
+        brief = EvidenceBrief(answer=self.answer, citations=self.citations,
+                              uncertainties=self.uncertainties,
+                              next_decisions=self.next_decisions)
         record = validate_provider_record(ProviderResult(brief=brief, audit=self.provider_audit))
-        if (
-            record.audit.workflow_id != self.workflow_id
-            or record.audit.request_digest != self.request_digest
-        ):
+        if (record.audit.workflow_id != self.workflow_id
+                or record.audit.request_digest != self.request_digest):
             raise ValueError("provider audit does not match the public result")
         return self

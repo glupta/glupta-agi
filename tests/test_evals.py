@@ -15,6 +15,18 @@ from tests.helpers import provider_audit, release_profile
 
 
 class CrawlEvalTests(unittest.TestCase):
+    def test_eval_requires_explicit_disclosure_ack_before_settings_or_credentials(self) -> None:
+        dataset = Dataset(
+            name="synthetic",
+            cases=[Case(name="synthetic", inputs=EvalInput(question="q", sources=[]))],
+        )
+        with (
+            patch("evals.runner.Settings.from_environment") as settings,
+            self.assertRaisesRegex(ValueError, "acknowledgement"),
+        ):
+            run_eval(dataset)
+        settings.assert_not_called()
+
     def test_frozen_dataset_loads_as_pydantic_evals_cases(self) -> None:
         path = Path(__file__).parents[1] / "evals" / "evidence_brief_v1.json"
         dataset = load_dataset(path, case_names={"EV-001-single-source"})
@@ -79,7 +91,7 @@ class CrawlEvalTests(unittest.TestCase):
         )
         settings = SimpleNamespace(
             dbos_system_database_url=lambda: "postgresql://local/synthetic",
-            require_external_profile=lambda: (release_profile(), Path("/private/synthetic-key")),
+            require_external_profile=lambda: (release_profile(), Path("/private/synthetic-key"), 1),
         )
 
         with (
@@ -87,7 +99,7 @@ class CrawlEvalTests(unittest.TestCase):
             patch("evals.runner.initialize") as initialize,
             patch("evals.runner._run_inference", inference),
         ):
-            report = run_eval(dataset)
+            report = run_eval(dataset, external_disclosure_ack=True)
 
         self.assertEqual(report.failures, [])
         self.assertEqual(len(report.cases), 1)
@@ -95,8 +107,14 @@ class CrawlEvalTests(unittest.TestCase):
         initialize.assert_called_once_with("postgresql://local/synthetic")
         inference.assert_awaited_once()
         packet = inference.await_args.args[0]
-        self.assertIn("What is the status?", packet.prompt)
-        self.assertEqual(packet.sources, inputs.sources)
+        self.assertEqual(packet.admitted_request["question"], "What is the status?")
+        self.assertEqual(
+            [
+                {key: source[key] for key in ("path", "content")}
+                for source in packet.admitted_request["sources"]
+            ],
+            inputs.sources,
+        )
 
     def test_forbidden_phrase_inside_negation_is_not_treated_as_asserted(self) -> None:
         output = EvidenceBrief(

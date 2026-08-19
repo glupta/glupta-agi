@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 import threading
+import traceback
 import unittest
 import urllib.error
 import uuid
@@ -335,6 +336,10 @@ class ClientTests(unittest.TestCase):
                     opener=http_error,
                 )
             self.assertNotIn(secret, str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertIsNone(caught.exception.__context__)
+            self.assertNotIn(secret, repr(vars(caught.exception)))
+            self.assertNotIn(secret, "".join(traceback.format_exception(caught.exception)))
 
             with self.assertRaises(ClientError):
                 submit(

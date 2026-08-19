@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,10 +29,14 @@ def release_profile(**overrides: object) -> ReleaseProfile:
         "product": "Responses API",
         "endpoint": "https://api.openai.com/v1",
         "account_class": "project_service_account",
+        "service_tier": "default",
         "project_id": "proj_crawl",
         "service_account_id": "svc_crawl",
         "api_key_id": "key_crawl",
         "credential_generation": 1,
+        "credential_sha256": hashlib.sha256(
+            ("secret-api-key-" + "x" * 32).encode("utf-8")
+        ).hexdigest(),
         "credential_expires_at": "2099-01-01T00:00:00Z",
         "evidence_expires_at": "2099-01-01T00:00:00Z",
         "data_terms_digest": digest,
@@ -78,6 +83,7 @@ def provider_audit(
         "response_id": "resp_1",
         "requested_model": PINNED_MODEL,
         "returned_model": PINNED_MODEL,
+        "service_tier": "default",
         "status": "completed",
         "input_tokens": 100,
         "cached_input_tokens": 0,
@@ -85,7 +91,7 @@ def provider_audit(
         "output_tokens": 20,
         "reasoning_tokens": 5,
         "total_tokens": 120,
-        "cost_upper_bound_micros": 1_100,
+        "cost_upper_bound_micros": 1_225,
         "request_body_digest": "b" * 64,
         "output_digest": "c" * 64,
         "validated_result_digest": canonical_digest(result.model_dump(mode="json")),

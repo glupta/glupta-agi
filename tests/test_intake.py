@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefRequest
-from glupta_agi.intake import IntakeError, load_request
+from glupta_agi.intake import IntakeError, load_request, validate_workflow_payload
 
 
 class IntakeTests(unittest.TestCase):
@@ -75,6 +76,29 @@ class IntakeTests(unittest.TestCase):
                 external_disclosure_ack=True,
             )
         self.assertEqual(canonical.disclosure_notice_digest, DISCLOSURE_NOTICE_DIGEST)
+        self.assertEqual(validate_workflow_payload(recorded), canonical)
+
+        for mutation in (
+            {**recorded, "request_digest": "f" * 64},
+            {**recorded, "disclosure_notice_digest": "0" * 64},
+            {**recorded, "external_disclosure_ack": False},
+            {
+                **recorded,
+                "sources": [{**recorded["sources"][0], "byte_size": True}],
+            },
+            {
+                **recorded,
+                "sources": [{**recorded["sources"][0], "content": b"RAW_SOURCE_BYTES"}],
+            },
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(IntakeError) as caught:
+                validate_workflow_payload(mutation)
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertIsNone(caught.exception.__context__)
+            self.assertNotIn("RAW_SOURCE_BYTES", repr(vars(caught.exception)))
+            self.assertNotIn(
+                "RAW_SOURCE_BYTES", "".join(traceback.format_exception(caught.exception))
+            )
 
     def test_changed_bytes_change_digest(self) -> None:
         before = load_request(input_root=self.root, question="q", selected_paths=["notes/facts.md"])
