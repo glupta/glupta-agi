@@ -101,6 +101,30 @@ regional Responses endpoint, and uses the frozen 10% regional price schedule.
 Static container addresses exist only so the separately approved Colima
 nftables/dnsmasq gate can default-deny app egress.
 
+Prepare—but do not apply—the reviewed Colima gate with the repository renderer.
+It accepts only the exact Glupta-owned `provision: null` value or a prior marked
+Glupta block, and verifies the Compose subnet/addresses against the regional
+endpoint map before producing a candidate. Rendering does not change Colima:
+
+```sh
+candidate=$(mktemp)
+uv run --frozen python deploy/egress/render_colima.py render \
+  --region us \
+  --config /Users/glupta/.colima/default/colima.yaml \
+  --compose compose.yaml \
+  --output "$candidate"
+uv run --frozen python deploy/egress/render_colima.py verify \
+  --region us --config "$candidate" --compose compose.yaml
+```
+
+Selecting `us` versus `europe`, installing the candidate, stopping or restarting
+Colima, applying firewall state, and running live egress checks are an independent
+deployment gate. Keep the app absent throughout an install or rollback. The gate
+allows only established traffic, app-to-PostgreSQL TCP/5432, and TCP/443 to the
+selected endpoint's DNS-derived IPv4 set; all other app traffic is rejected.
+This is an L3/L4 destination-IP control, not TLS-host proof: shared provider IPs
+remain a documented limitation and would require a separately approved L7 design.
+
 Once every independent release gate is satisfied, the approved local secret
 broker supplies the four private values only to the staging subprocess. Its JSON
 receipt provides the two non-secret volume names used by Compose:
