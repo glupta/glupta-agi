@@ -7,7 +7,14 @@ from unittest.mock import Mock, patch
 import pytest
 
 from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief
-from glupta_agi.effects import AmbiguousEffectError, _effect, hold_unknown, initialize
+from glupta_agi.effects import (
+    AmbiguousEffectError,
+    _effect,
+    dispatch_phase,
+    hold_unknown,
+    initialize,
+    phase_marker,
+)
 from glupta_agi.inference import FrozenDispatch
 from tests.helpers import provider_audit
 
@@ -82,6 +89,17 @@ def test_reconciled_effect_requires_exact_subscription_result_binding() -> None:
     for changed in mutations:
         with pytest.raises(RuntimeError, match="do not match"):
             _effect(_row(state="reconciled", result_json=result, audit_json=changed))
+
+
+def test_dispatch_phase_evidence_is_sanitized_and_v4_compatible() -> None:
+    marker = phase_marker("thread_start_started")
+    assert marker == "dispatch_phase:thread_start_started"
+    assert dispatch_phase(_effect(_row(state="dispatching", hold_reason=marker))) == (
+        "thread_start_started"
+    )
+    assert dispatch_phase(_effect(_row(state="dispatching", hold_reason="legacy"))) is None
+    with pytest.raises(RuntimeError, match="not allowed"):
+        phase_marker("RAW_UNBOUNDED_PHASE")
 
 
 def test_initialize_rejects_prior_schema_and_unknown_hold_is_redacted() -> None:

@@ -50,8 +50,9 @@ def _launch_args(codex_home: Path, state_home: Path) -> tuple[str, ...]:
 
 
 class CodexSubscriptionAdapter:
-    def __init__(self, profile: ReleaseProfile, codex_home: Path, *, auth_generation: int, client_factory: Any = AsyncCodex) -> None:
-        self.profile, self.codex_home = profile, codex_home
+    def __init__(self, profile: ReleaseProfile, codex_home: Path, *, auth_generation: int,
+        phase_recorder: Any, client_factory: Any = AsyncCodex) -> None:
+        self.profile, self.codex_home, self.phase_recorder = profile, codex_home, phase_recorder
         self.auth_generation, self.client_factory = auth_generation, client_factory
 
     async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> contracts.ProviderResult:
@@ -81,26 +82,33 @@ class CodexSubscriptionAdapter:
             raise AdapterError("model request exceeded the wall deadline")
         client = result = thread = completed = None
         error: AdapterError | None = None
-        cleanup_failed = False
+        cleanup_failed = turn_invoked = False
         try:
             with tempfile.TemporaryDirectory(prefix="glupta-crawl-") as cwd, tempfile.TemporaryDirectory(prefix="glupta-codex-state-") as state:
                 client = self.client_factory(CodexConfig(cwd=cwd, launch_args_override=_launch_args(self.codex_home, Path(state))))
                 async with asyncio.timeout(remaining):
+                    self.phase_recorder("account_lookup_started")
                     account_response = await client.account(refresh_token=False)
                     account = None if account_response.account is None else account_response.account.root
                     if not isinstance(account, ChatgptAccount) or account.plan_type.value != dispatch.subscription_plan:
                         raise AdapterError("approved ChatGPT subscription is unavailable")
+                    self.phase_recorder("model_catalog_started")
                     models = await client.models()
                     model = next((item for item in models.data if item.model == dispatch.model), None)
                     efforts = () if model is None else model.supported_reasoning_efforts
                     if model is None or not any(item.reasoning_effort == ReasoningEffort.medium for item in efforts):
                         raise AdapterError("approved Codex model is unavailable")
                     config = {"features": {feature: False for feature in _DISABLED_FEATURES}, "model_provider": "crawl_openai", "model_providers": {"crawl_openai": {"name": "OpenAI", "requires_openai_auth": True, "wire_api": "responses", "request_max_retries": 0, "stream_max_retries": 0}}, "tools": {"view_image": False}, "web_search": WebSearchMode.disabled.value}
+                    self.phase_recorder("thread_start_started")
                     thread = await client.thread_start(approval_mode=ApprovalMode.deny_all, base_instructions=SYSTEM_PROMPT, config=config, cwd=cwd, ephemeral=True, model=dispatch.model, sandbox=Sandbox.read_only)
+                    self.phase_recorder("turn_invocation_started")
+                    turn_invoked = True
                     result = await thread.run(str(request_body["input"]), approval_mode=ApprovalMode.deny_all, cwd=cwd, effort=ReasoningEffort.medium, model=dispatch.model, output_schema=contracts.EvidenceBrief.model_json_schema(), sandbox=Sandbox.read_only)
+                    self.phase_recorder("turn_returned")
                     completed = datetime.now(UTC)
-        except AdapterError as exc:
-            error = exc
+        except (Exception, asyncio.CancelledError) as exc:
+            error_type = ProviderAmbiguousError if turn_invoked else AdapterError
+            error = exc if isinstance(exc, AdapterError) else error_type("Codex subscription scope failed")
         finally:
             if client is not None:
                 try:
@@ -110,7 +118,8 @@ class CodexSubscriptionAdapter:
                 except (Exception, asyncio.CancelledError):
                     cleanup_failed = True
         if cleanup_failed:
-            raise ProviderAmbiguousError("Codex subscription cleanup is ambiguous")
+            error_type = ProviderAmbiguousError if turn_invoked else AdapterError
+            raise error_type("Codex subscription cleanup failed")
         if error is not None:
             raise error
         if result is None or thread is None or completed is None:
