@@ -9,7 +9,6 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from .inference import PINNED_MODEL, ReleaseProfile
-from .openai_adapter import AdapterError, validate_api_key
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
 
@@ -23,8 +22,11 @@ def _read_private_file(path: Path, *, label: str, maximum_bytes: int, minimum: i
     try:
         file_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         metadata = os.fstat(file_fd)
-        if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600
-                or metadata.st_uid != os.geteuid()):
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.geteuid()
+        ):
             raise SettingsError(f"{label} file must be owned, regular, and mode 0600")
         with os.fdopen(file_fd, encoding="utf-8") as private_file:
             file_fd = -1
@@ -44,16 +46,22 @@ def _read_private_file(path: Path, *, label: str, maximum_bytes: int, minimum: i
     return value
 
 
-def _validate_private_path(path: Path, *, label: str) -> None:
+def _validate_codex_home(path: Path) -> None:
     if not path.is_absolute():
-        raise SettingsError(f"{label} path must be absolute")
+        raise SettingsError("Codex subscription home path must be absolute")
     try:
-        metadata = path.lstat()
+        home, auth = path.lstat(), (path / "auth.json").lstat()
     except OSError:
-        raise SettingsError(f"{label} file is unavailable") from None
-    if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_uid != os.geteuid()):
-        raise SettingsError(f"{label} file must be owned, regular, and mode 0600")
+        raise SettingsError("Codex subscription authentication is unavailable") from None
+    if (
+        not stat.S_ISDIR(home.st_mode)
+        or stat.S_IMODE(home.st_mode) != 0o700
+        or home.st_uid != os.geteuid()
+        or not stat.S_ISREG(auth.st_mode)
+        or stat.S_IMODE(auth.st_mode) != 0o600
+        or auth.st_uid != os.geteuid()
+    ):
+        raise SettingsError("Codex subscription authentication is not private")
 
 
 @dataclass(frozen=True)
@@ -62,60 +70,65 @@ class Settings:
     token: str
     release_profile: ReleaseProfile | None = None
     release_profile_digest: str = ""
-    openai_api_key_file: Path | None = None
-    credential_generation: int = 0
+    codex_home: Path | None = None
+    auth_generation: int = 0
     model: str = PINNED_MODEL
 
     @classmethod
     def from_environment(cls) -> Settings:
-        profile_path = Path(os.environ.get("GLUPTA_RELEASE_PROFILE_FILE", "/run/private/release-profile.json"))  # noqa: E501
+        profile_path = Path(
+            os.environ.get("GLUPTA_RELEASE_PROFILE_FILE", "/run/private/release-profile.json")
+        )
         invalid_profile = False
         try:
-            profile = ReleaseProfile.model_validate_json(_read_private_file(
-                profile_path, label="release profile", maximum_bytes=32_768))
+            profile = ReleaseProfile.model_validate_json(
+                _read_private_file(profile_path, label="release profile", maximum_bytes=32_768)
+            )
         except ValueError:
             invalid_profile = True
         if invalid_profile:
             raise SettingsError("release profile is invalid") from None
         if not profile.current_at():
             raise SettingsError("release profile evidence is expired")
-        credential_path = Path(os.environ.get("GLUPTA_OPENAI_API_KEY_FILE", "/run/private/openai-api-key"))  # noqa: E501
-        _validate_private_path(credential_path, label="OpenAI credential")
+        codex_home = Path(os.environ.get("GLUPTA_CODEX_HOME", "/run/codex"))
+        _validate_codex_home(codex_home)
         try:
-            raw_generation = os.environ["GLUPTA_CREDENTIAL_GENERATION"]
+            raw_generation = os.environ["GLUPTA_AUTH_GENERATION"]
             generation = int(raw_generation)
-            if (not raw_generation.isascii() or not raw_generation.isdecimal()
-                    or str(generation) != raw_generation):
+            if (
+                not raw_generation.isascii()
+                or not raw_generation.isdecimal()
+                or str(generation) != raw_generation
+            ):
                 raise ValueError
         except (KeyError, ValueError):
-            raise SettingsError("credential generation is unavailable") from None
-        if generation < 1 or generation != profile.credential_generation:
-            raise SettingsError("credential generation does not match the release profile")
-        invalid_credential = False
-        try:
-            validate_api_key(credential_path, profile.credential_sha256)
-        except AdapterError:
-            invalid_credential = True
-        if invalid_credential:
-            raise SettingsError("OpenAI credential does not match release evidence") from None
+            raise SettingsError("subscription auth generation is unavailable") from None
+        if generation < 1 or generation != profile.auth_generation:
+            raise SettingsError("subscription auth generation does not match the release profile")
         token_path = Path(os.environ.get("GLUPTA_INTAKE_TOKEN_FILE", "/run/private/intake-token"))
         token = _read_private_file(
-            token_path, label="intake capability", maximum_bytes=4096, minimum=32)
-        return cls(input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/data/inputs")),
-                   token=token, release_profile=profile,
-                   release_profile_digest=profile.digest(), openai_api_key_file=credential_path,
-                   credential_generation=generation)
+            token_path, label="intake capability", maximum_bytes=4096, minimum=32
+        )
+        return cls(
+            input_root=Path(os.environ.get("GLUPTA_INPUT_ROOT", "/data/inputs")),
+            token=token,
+            release_profile=profile,
+            release_profile_digest=profile.digest(),
+            codex_home=codex_home,
+            auth_generation=generation,
+        )
 
     def require_external_profile(self) -> tuple[ReleaseProfile, Path, int]:
-        if self.release_profile is None or self.openai_api_key_file is None:
+        if self.release_profile is None or self.codex_home is None:
             raise SettingsError("external inference release profile is unavailable")
         if self.release_profile.digest() != self.release_profile_digest:
             raise SettingsError("external inference release profile changed")
         if not self.release_profile.current_at():
             raise SettingsError("release profile evidence is expired")
-        if self.credential_generation != self.release_profile.credential_generation:
-            raise SettingsError("credential generation does not match the release profile")
-        return self.release_profile, self.openai_api_key_file, self.credential_generation
+        if self.auth_generation != self.release_profile.auth_generation:
+            raise SettingsError("subscription auth generation does not match the release profile")
+        _validate_codex_home(self.codex_home)
+        return self.release_profile, self.codex_home, self.auth_generation
 
     @staticmethod
     def dbos_system_database_url() -> str:
@@ -126,8 +139,9 @@ class Settings:
                 del explicit, parsed
                 raise SettingsError("DBOS system database must be local PostgreSQL")
             return explicit
-        password_path = Path(os.environ.get(
-            "GLUPTA_POSTGRES_PASSWORD_FILE", "/run/private/postgres-password"))
+        password_path = Path(
+            os.environ.get("GLUPTA_POSTGRES_PASSWORD_FILE", "/run/private/postgres-password")
+        )
         user = quote(os.environ.get("GLUPTA_POSTGRES_USER", "glupta"), safe="")
         host = os.environ.get("GLUPTA_POSTGRES_HOST", "postgres")
         if host not in LOCAL_HOSTS:

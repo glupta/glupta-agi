@@ -2,7 +2,7 @@ name: glupta-crawl
 
 services:
   app:
-    image: glupta-crawl@sha256:a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf
+    image: ${GLUPTA_IMAGE:?set an exact approved image reference}
     restart: unless-stopped
     user: "65532:65532"
     environment:
@@ -12,8 +12,8 @@ services:
       GLUPTA_POSTGRES_HOST: postgres
       GLUPTA_POSTGRES_PORT: 5432
       GLUPTA_RELEASE_PROFILE_FILE: /run/private/release-profile.json
-      GLUPTA_OPENAI_API_KEY_FILE: /run/private/openai-api-key
-      GLUPTA_CREDENTIAL_GENERATION: ${GLUPTA_CREDENTIAL_GENERATION:?set GLUPTA_CREDENTIAL_GENERATION}
+      GLUPTA_CODEX_HOME: /run/codex
+      GLUPTA_AUTH_GENERATION: ${GLUPTA_AUTH_GENERATION:?set GLUPTA_AUTH_GENERATION}
       GLUPTA_HOST: 0.0.0.0
       GLUPTA_PORT: 8080
     read_only: true
@@ -30,6 +30,11 @@ services:
         source: app-private
         target: /run/private
         read_only: true
+        volume:
+          nocopy: true
+      - type: volume
+        source: codex-subscription
+        target: /run/codex
         volume:
           nocopy: true
     ports:
@@ -85,6 +90,9 @@ volumes:
   app-private:
     external: true
     name: ${GLUPTA_APP_PRIVATE_VOLUME:?stage an immutable app private volume}
+  codex-subscription:
+    external: true
+    name: ${GLUPTA_CODEX_SUBSCRIPTION_VOLUME:?stage an approved Codex subscription volume}
   postgres-private:
     external: true
     name: ${GLUPTA_POSTGRES_PRIVATE_VOLUME:?stage an immutable PostgreSQL private volume}

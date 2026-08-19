@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,8 +13,6 @@ from glupta_agi.contracts import (
 from glupta_agi.inference import (
     DISCLOSURE_PROFILE,
     PINNED_MODEL,
-    PRICE_SCHEDULE,
-    PRICE_SCHEDULE_DIGEST,
     ReleaseProfile,
 )
 
@@ -23,38 +20,32 @@ from glupta_agi.inference import (
 def release_profile(**overrides: object) -> ReleaseProfile:
     digest = "a" * 64
     values: dict[str, object] = {
-        "schema_version": "crawl-openai-release-v2",
+        "schema_version": "crawl-codex-subscription-release-v1",
         "disclosure_profile": DISCLOSURE_PROFILE,
         "provider": "openai",
-        "product": "Responses API",
-        "endpoint": "https://us.api.openai.com/v1",
-        "account_class": "project_service_account",
-        "service_tier": "default",
-        "project_id": "proj_crawl",
-        "service_account_id": "svc_crawl",
-        "api_key_id": "key_crawl",
-        "credential_generation": 1,
-        "credential_sha256": hashlib.sha256(
-            ("secret-api-key-" + "x" * 32).encode("utf-8")
-        ).hexdigest(),
-        "credential_expires_at": "2099-01-01T00:00:00Z",
+        "product": "Codex subscription",
+        "account_class": "chatgpt_subscription",
+        "subscription_route_id": "crawl_subscription",
+        "subscription_plan": "pro",
+        "auth_generation": 1,
+        "auth_evidence_digest": digest,
+        "auth_expires_at": "2099-01-01T00:00:00Z",
         "evidence_expires_at": "2099-01-01T00:00:00Z",
         "data_terms_digest": digest,
         "rights_evidence_digest": digest,
-        "region": "us",
-        "rate_limit_rpm": 1,
         "model": PINNED_MODEL,
-        "max_input_tokens": 270_000,
-        "max_output_tokens": 4_000,
-        "max_reasoning_tokens": 4_000,
-        "max_usd_micros": 2_000_000,
+        "reasoning_effort": "medium",
+        "max_input_bytes": 262_144,
+        "max_observed_input_tokens": 270_000,
+        "max_observed_output_tokens": 8_000,
+        "max_observed_reasoning_tokens": 8_000,
+        "max_calls": 1,
         "queue_timeout_seconds": 300,
         "wall_timeout_seconds": 300,
-        "retry_owner": "dbos",
-        "sdk_retries": 0,
-        "store": False,
-        "price_schedule_id": PRICE_SCHEDULE,
-        "price_schedule_digest": PRICE_SCHEDULE_DIGEST,
+        "sdk_version": "0.147.0",
+        "runtime_version": "0.147.0",
+        "request_retries": 0,
+        "stream_retries": 0,
         "manifest_digest": digest,
         "sbom_digest": digest,
         "provenance_digest": digest,
@@ -78,16 +69,14 @@ def provider_audit(
         "workflow_id": workflow_id,
         "request_digest": request_digest,
         "release_profile_digest": release_profile().digest(),
-        "region": "us",
-        "endpoint": "https://us.api.openai.com/v1",
-        "price_schedule_id": PRICE_SCHEDULE,
-        "price_schedule_digest": PRICE_SCHEDULE_DIGEST,
-        "client_request_id": "client_1",
-        "provider_request_id": "req_1",
-        "response_id": "resp_1",
+        "subscription_route_id": "crawl_subscription",
+        "subscription_plan": "pro",
+        "sdk_version": "0.147.0",
+        "runtime_version": "0.147.0",
+        "thread_id": "thread_1",
+        "turn_id": "turn_1",
         "requested_model": PINNED_MODEL,
-        "returned_model": PINNED_MODEL,
-        "service_tier": "default",
+        "reasoning_effort": "medium",
         "status": "completed",
         "input_tokens": 100,
         "cached_input_tokens": 0,
@@ -95,7 +84,6 @@ def provider_audit(
         "output_tokens": 20,
         "reasoning_tokens": 5,
         "total_tokens": 120,
-        "cost_upper_bound_micros": 1_348,
         "request_body_digest": "b" * 64,
         "output_digest": "c" * 64,
         "validated_result_digest": canonical_digest(result.model_dump(mode="json")),
@@ -112,6 +100,13 @@ def private_file(root: Path, name: str, value: str) -> Path:
     path.write_text(value, encoding="utf-8")
     path.chmod(0o600)
     return path
+
+
+def codex_home(root: Path) -> Path:
+    home = root / "codex-home"
+    home.mkdir(mode=0o700)
+    private_file(home, "auth.json", "synthetic-auth-metadata")
+    return home
 
 
 def write_profile(root: Path, profile: ReleaseProfile | None = None) -> Path:

@@ -38,7 +38,12 @@ def _workflow_id(raw: str | None) -> str:
 
 @app.get("/healthz")
 async def health() -> dict[str, str]:
-    return {"status": "healthy", "stage": "Crawl", "actions": "disabled", "inference": "external_disclosed_v1"}  # noqa: E501
+    return {
+        "status": "healthy",
+        "stage": "Crawl",
+        "actions": "disabled",
+        "inference": "external_disclosed_v1",
+    }
 
 
 @app.post("/v1/evidence-brief", response_model=EvidenceBriefResponse)
@@ -51,17 +56,29 @@ async def evidence_brief(
     _bearer(authorization, settings)
     workflow_id = _workflow_id(idempotency_key)
     try:
-        canonical = load_request(input_root=settings.input_root, question=request.question,
-            selected_paths=request.files, disclosure_profile=request.disclosure_profile,
-            disclosure_notice_digest=request.disclosure_notice_digest, external_disclosure_ack=request.external_disclosure_ack)  # noqa: E501
+        canonical = load_request(
+            input_root=settings.input_root,
+            question=request.question,
+            selected_paths=request.files,
+            disclosure_profile=request.disclosure_profile,
+            disclosure_notice_digest=request.disclosure_notice_digest,
+            external_disclosure_ack=request.external_disclosure_ack,
+        )
     except IntakeError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
 
     payload = canonical.workflow_payload()
     with SetWorkflowID(workflow_id):
-        profile, credential_file, credential_generation = settings.require_external_profile()
-        handle = await crawl_observe_queue.enqueue_async(evidence_brief_workflow, payload,
-            workflow_id, profile.model_dump(mode="json"), str(credential_file), credential_generation, datetime.now(UTC).isoformat())  # noqa: E501
+        profile, codex_home, auth_generation = settings.require_external_profile()
+        handle = await crawl_observe_queue.enqueue_async(
+            evidence_brief_workflow,
+            payload,
+            workflow_id,
+            profile.model_dump(mode="json"),
+            str(codex_home),
+            auth_generation,
+            datetime.now(UTC).isoformat(),
+        )
 
     recorded = await DBOS.get_workflow_status_async(workflow_id)
     recorded_args = recorded.input["args"] if recorded is not None and recorded.input else ()
@@ -78,6 +95,7 @@ async def evidence_brief(
     except BriefGenerationError as exc:
         error = status.HTTP_502_BAD_GATEWAY, str(exc)
     if error is not None:
-        del request, authorization, idempotency_key, settings, workflow_id, canonical, payload, profile, credential_file, credential_generation, handle, recorded, recorded_args  # noqa: E501
+        del request, authorization, idempotency_key, settings, workflow_id, canonical, payload
+        del profile, codex_home, auth_generation, handle, recorded, recorded_args
         raise HTTPException(error[0], error[1]) from None
     return EvidenceBriefResponse.model_validate(result)
