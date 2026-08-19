@@ -24,8 +24,6 @@ class RenderError(RuntimeError):
 def _validate_contract(repo: Path) -> None:
     compose = (repo / "compose.yaml").read_text(encoding="utf-8")
     required = (
-        f"ipv4_address: {APP_IP}",
-        f"ipv4_address: {POSTGRES_IP}",
         f"subnet: {SUBNET}",
         "enable_ipv6: false",
     )
@@ -37,6 +35,26 @@ def _validate_contract(repo: Path) -> None:
     )
     if services != ["app", "postgres"]:
         raise RenderError("Compose steady-state service identity changed")
+    service_starts = list(
+        re.finditer(r"^  ([a-z][a-z0-9_-]*):\s*$", match.group("body"), re.MULTILINE)
+    )
+    service_blocks = {
+        item.group(1): match.group("body")[
+            item.end() : service_starts[index + 1].start()
+            if index + 1 < len(service_starts)
+            else None
+        ]
+        for index, item in enumerate(service_starts)
+    }
+    expected_ips = {"app": APP_IP, "postgres": POSTGRES_IP}
+    for service, expected_ip in expected_ips.items():
+        addresses = re.findall(
+            r"^[ \t]+ipv4_address:[ \t]*(\S+)[ \t]*$",
+            service_blocks[service],
+            re.MULTILINE,
+        )
+        if addresses != [expected_ip]:
+            raise RenderError("Compose egress identity does not match the reviewed contract")
 
     project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = project.get("project", {}).get("dependencies", [])
@@ -52,7 +70,7 @@ def _validate_contract(repo: Path) -> None:
     if any(adapter.count(item) != 1 for item in invariants):
         raise RenderError("Codex subscription route controls changed")
     forbidden = ("chatgpt_base_url", "OPENAI_BASE_URL", "CODEX_BASE_URL")
-    if any(item in adapter for item in forbidden):
+    if re.search(r"\bbase_url\b", adapter) or any(item in adapter for item in forbidden):
         raise RenderError("Codex subscription route contains an endpoint override")
 
 

@@ -88,6 +88,20 @@ def test_render_refuses_compose_identity_drift(tmp_path: Path, old: str, new: st
         render_colima.render(_config(tmp_path), tmp_path / "candidate.yaml", repo, TEMPLATE)
 
 
+def test_render_refuses_swapped_compose_service_addresses(tmp_path: Path) -> None:
+    repo = _repo_copy(tmp_path)
+    path = repo / "compose.yaml"
+    compose = path.read_text(encoding="utf-8")
+    path.write_text(
+        compose.replace("172.30.47.2", "172.30.47.swap", 1)
+        .replace("172.30.47.3", "172.30.47.2", 1)
+        .replace("172.30.47.swap", "172.30.47.3", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(render_colima.RenderError, match="Compose egress identity"):
+        render_colima.render(_config(tmp_path), tmp_path / "candidate.yaml", repo, TEMPLATE)
+
+
 def test_render_refuses_a_third_steady_state_service(tmp_path: Path) -> None:
     repo = _repo_copy(tmp_path)
     path = repo / "compose.yaml"
@@ -131,6 +145,20 @@ def test_render_refuses_endpoint_override(tmp_path: Path) -> None:
     adapter.write_text(
         adapter.read_text(encoding="utf-8")
         + '\nchatgpt_base_url = "https://elsewhere.invalid"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(render_colima.RenderError, match="endpoint override"):
+        render_colima.render(_config(tmp_path), tmp_path / "candidate.yaml", repo, TEMPLATE)
+
+
+def test_render_refuses_model_provider_base_url_override(tmp_path: Path) -> None:
+    repo = _repo_copy(tmp_path)
+    adapter = repo / "src" / "glupta_agi" / "codex_adapter.py"
+    adapter.write_text(
+        adapter.read_text(encoding="utf-8").replace(
+            '"crawl_openai": {"name": "OpenAI",',
+            '"crawl_openai": {"base_url": "https://elsewhere.invalid", "name": "OpenAI",',
+        ),
         encoding="utf-8",
     )
     with pytest.raises(render_colima.RenderError, match="endpoint override"):
