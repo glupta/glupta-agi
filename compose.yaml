@@ -2,8 +2,7 @@ name: glupta-crawl
 
 services:
   app:
-    image: glupta-crawl:0.3.1
-    build: .
+    image: glupta-crawl@sha256:a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf
     restart: unless-stopped
     user: "65532:65532"
     environment:

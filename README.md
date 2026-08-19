@@ -110,7 +110,9 @@ export GLUPTA_CREDENTIAL_GENERATION=1
 uv run --frozen python scripts/stage_private_volumes.py
 export GLUPTA_APP_PRIVATE_VOLUME=<app_volume-from-receipt>
 export GLUPTA_POSTGRES_PRIVATE_VOLUME=<postgres_volume-from-receipt>
-docker compose up -d --build --remove-orphans
+test "$(docker image inspect glupta-crawl@sha256:a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf --format '{{.Id}}')" = \
+  'sha256:a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf'
+docker compose up --detach --no-build --pull never --remove-orphans --wait --wait-timeout 120
 curl --fail http://127.0.0.1:8765/healthz
 ```
 

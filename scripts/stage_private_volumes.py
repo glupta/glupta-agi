@@ -53,9 +53,11 @@ def _stage(docker: str, volume: str, purpose: str, payload: bytes, generation: i
     _run([docker, "volume", "create", "--label", "com.glupta.private=true", "--label",
         f"com.glupta.purpose={purpose}", "--label", f"com.glupta.generation={generation}", volume])
     try:
-        _run([docker, "run", "--rm", "--interactive", "--user", "0:0", "--mount",
-            f"type=volume,src={volume},dst=/target", "--entrypoint", "/usr/bin/tar",
-            STAGER_IMAGE, "-x", "-C", "/target"], payload=payload)
+        _run([docker, "run", "--rm", "--interactive", "--network", "none",
+            "--security-opt", "no-new-privileges:true", "--cap-drop", "ALL", "--cap-add",
+            "CHOWN", "--user", "0:0", "--mount", f"type=volume,src={volume},dst=/target",
+            "--entrypoint", "/usr/bin/tar", STAGER_IMAGE, "-x", "-f", "-", "-C",
+            "/target"], payload=payload)
     except StagingError:
         _run([docker, "volume", "rm", volume])
         raise

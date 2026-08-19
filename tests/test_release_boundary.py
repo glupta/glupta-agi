@@ -69,11 +69,20 @@ class ReleaseBoundaryTests(TestCase):
     def test_container_and_database_bases_are_digest_pinned(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertEqual(dockerfile.count("@sha256:"), 3)
         self.assertIn("--no-install-project", dockerfile)
         self.assertIn("COPY --from=build --chown=65532:65532 /app/.venv /app/.venv", dockerfile)
         self.assertIn('ENTRYPOINT ["/app/.venv/bin/python"]', dockerfile)
         self.assertIn("postgres:17.6-bookworm@sha256:", compose)
+        self.assertIn(
+            "glupta-crawl@sha256:"
+            "a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf",
+            compose,
+        )
+        self.assertNotIn("build:", compose)
+        self.assertIn("--no-build --pull never", readme)
+        self.assertNotIn("docker compose up -d --build", readme)
         self.assertIn("GLUPTA_CREDENTIAL_GENERATION:?", compose)
         self.assertNotIn("GLUPTA_UID", compose)
         self.assertNotIn("secrets:", compose)
