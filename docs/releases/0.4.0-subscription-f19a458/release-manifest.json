@@ -1,0 +1,63 @@
+{
+  "schema_version": "glupta-subscription-release-evidence-v1",
+  "status": "release_held",
+  "source": {
+    "repository": "https://github.com/glupta/glupta-agi.git",
+    "revision": "f19a458246de6529e7fcfc61f94498a3401dc12d",
+    "tree": "7b4cdefe994eded88377dbbeb375748f5d3f3d17",
+    "version": "0.4.0"
+  },
+  "image": {
+    "local_reference": "glupta-crawl:subscription-0.4.0-f19a458",
+    "index_digest": "sha256:6f8af6a08661f8315d1285e8764ec8b260097426ccd3b8c6d937218250bc9850",
+    "platform": "linux/arm64",
+    "platform_manifest_digest": "sha256:de19027c592abd065ac44e310892202748f43245f3a2ab430517745824b0baa9",
+    "runtime_user": "65532:65532"
+  },
+  "build": {
+    "buildx_record": "sdzahahfmtugd31uooflp03u2",
+    "buildkit_version": "v0.27.1",
+    "dependency_resolution": "uv sync --frozen",
+    "dependency_network": "connected_locked_fetch",
+    "base_images_digest_pinned": true,
+    "attestation_manifest_digest": "sha256:6a7add49521e550e6b8c6f3cfa874fb9e6f725bdbe9f59a5fe06fd8621a4a0a8",
+    "embedded_spdx_statement_digest": "sha256:ca88dc9ac1713b3f25b466e5ff123a518cd0cfccd7f5452cabfb3335a451a48d",
+    "embedded_provenance_statement_digest": "sha256:0f11f8d8ea22d345e67610d7a8730f43b22d4246385d14b5efb7e1df15798021",
+    "provenance_predicate_digest": "sha256:4d5fa8a75dd9ab63899f852a77b3072e4b93903a6ed92853ebce0001b05835ca",
+    "builder_identity": "untrusted_local_buildkit",
+    "reproducible_claim": false
+  },
+  "evidence": {
+    "provenance.intoto.json": "0f11f8d8ea22d345e67610d7a8730f43b22d4246385d14b5efb7e1df15798021",
+    "sbom.cdx.json": "83dc2740b41395ccf1c145c52b5d89f862580725f0d78a0a346242312adce90a",
+    "vulnerabilities.trivy.json": "7a5cf7995786d21534f17e83e8ba0ff0ca81f3cf466d525326fcb31ca3c5e210",
+    "rollback-rehearsal.json": "f067cec7786a9c9c27a9c2869334672f7f6e7ad2f83a8538f2fee20b57273830"
+  },
+  "verification": {
+    "trivy_version": "0.74.0",
+    "trivy_database_updated_at": "2026-08-18T18:30:40.017638579Z",
+    "vulnerabilities_total": 0,
+    "secret_findings_total": 0,
+    "runtime_package_version": "0.4.0",
+    "codex_sdk_version": "0.147.0",
+    "cold_start": true,
+    "restart": true,
+    "rollback": true,
+    "forward_restore": true,
+    "provider_dispatch": false,
+    "synthetic_only": true,
+    "cleanup_complete": true
+  },
+  "signature": {
+    "status": "held",
+    "reason": "No approved signing identity or signature action was granted for this artifact."
+  },
+  "remaining_gates": [
+    "approved signing identity and exact-image signature",
+    "real ChatGPT subscription account, plan, generation, and official-login evidence",
+    "native Codex route default-deny egress application and reboot proof",
+    "exact release and deployment approval",
+    "controlled read-only canary approval",
+    "task-drain approval"
+  ]
+}
