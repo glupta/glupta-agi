@@ -91,7 +91,7 @@ class CrawlEvalTests(unittest.TestCase):
         )
         settings = SimpleNamespace(
             dbos_system_database_url=lambda: "postgresql://local/synthetic",
-            require_external_profile=lambda: (release_profile(), Path("/private/synthetic-key"), 1),
+            require_external_profile=lambda: (release_profile(), Path("/private/codex"), 1),
         )
 
         with (

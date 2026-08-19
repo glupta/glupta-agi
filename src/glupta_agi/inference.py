@@ -7,50 +7,40 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from .contracts import DISCLOSURE_NOTICE_DIGEST, ProviderResult, canonical_digest
 
-DISCLOSURE_PROFILE, PINNED_MODEL = "external_disclosed_v1", "gpt-5.6-sol"
-REGIONAL_ENDPOINTS = {"us": "https://us.api.openai.com/v1", "europe": "https://eu.api.openai.com/v1"}
-PRICE_SCHEDULE = "openai-gpt-5.6-sol-regional-2026-08-18"
-REGIONAL_UPLIFT_BPS, MAX_USD_MICROS = 11_000, 2_000_000
-# Reserve the documented 1.25x cache-write premium for every input token.
-INPUT_USD_MICROS_PER_MILLION, OUTPUT_USD_MICROS_PER_MILLION = 6_250_000, 30_000_000
-
-
-PRICE_SCHEDULE_DIGEST = canonical_digest({"id": PRICE_SCHEDULE, "model": PINNED_MODEL,
-    "service_tier": "default", "regional_endpoints": REGIONAL_ENDPOINTS, "regional_uplift_bps": REGIONAL_UPLIFT_BPS, "input_usd_micros_per_million": INPUT_USD_MICROS_PER_MILLION, "output_usd_micros_per_million": OUTPUT_USD_MICROS_PER_MILLION})  # noqa: E501
+DISCLOSURE_PROFILE = "external_disclosed_v1"
+PINNED_MODEL, PINNED_EFFORT = "gpt-5.6-sol", "medium"
+SDK_VERSION = RUNTIME_VERSION = "0.147.0"
+ALLOWED_PLANS = frozenset({"plus", "pro", "prolite", "team", "business", "enterprise", "edu"})
 
 
 class ReleaseProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: str
-    disclosure_profile: str
-    provider: str
-    product: str
-    endpoint: str
-    account_class: str
-    service_tier: Literal["default"]
-    project_id: str = Field(pattern=r"^proj_[A-Za-z0-9_-]+$")
-    service_account_id: str = Field(min_length=3, max_length=256)
-    api_key_id: str = Field(min_length=3, max_length=256)
-    credential_generation: StrictInt = Field(ge=1)
-    credential_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    credential_expires_at: datetime
+    schema_version: Literal["crawl-codex-subscription-release-v1"]
+    disclosure_profile: Literal["external_disclosed_v1"]
+    provider: Literal["openai"]
+    product: Literal["Codex subscription"]
+    account_class: Literal["chatgpt_subscription"]
+    subscription_route_id: str = Field(min_length=3, max_length=128)
+    subscription_plan: str = Field(min_length=2, max_length=64)
+    auth_generation: StrictInt = Field(ge=1)
+    auth_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    auth_expires_at: datetime
     evidence_expires_at: datetime
     data_terms_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     rights_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    region: Literal["us", "europe"]
-    rate_limit_rpm: StrictInt = Field(ge=1, le=60)
-    model: str
-    max_input_tokens: StrictInt
-    max_output_tokens: StrictInt
-    max_reasoning_tokens: StrictInt
-    max_usd_micros: StrictInt
+    model: Literal["gpt-5.6-sol"]
+    reasoning_effort: Literal["medium"]
+    max_input_bytes: StrictInt
+    max_observed_input_tokens: StrictInt
+    max_observed_output_tokens: StrictInt
+    max_observed_reasoning_tokens: StrictInt
+    max_calls: Literal[1]
     queue_timeout_seconds: StrictInt
     wall_timeout_seconds: StrictInt
-    retry_owner: str
-    sdk_retries: StrictInt
-    store: bool
-    price_schedule_id: str
-    price_schedule_digest: str
+    sdk_version: Literal["0.147.0"]
+    runtime_version: Literal["0.147.0"]
+    request_retries: Literal[0]
+    stream_retries: Literal[0]
     manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     sbom_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     provenance_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -60,21 +50,18 @@ class ReleaseProfile(BaseModel):
 
     @model_validator(mode="after")
     def fixed_policy(self) -> ReleaseProfile:
-        expected = {"schema_version": "crawl-openai-release-v2",
-            "disclosure_profile": DISCLOSURE_PROFILE, "provider": "openai",
-            "product": "Responses API",
-            "account_class": "project_service_account", "model": PINNED_MODEL,
-            "max_input_tokens": 270_000, "max_output_tokens": 4_000,
-            "max_reasoning_tokens": 4_000, "max_usd_micros": MAX_USD_MICROS,
-            "queue_timeout_seconds": 300, "wall_timeout_seconds": 300,
-            "retry_owner": "dbos", "sdk_retries": 0, "store": False,
-            "price_schedule_id": PRICE_SCHEDULE,
-            "price_schedule_digest": PRICE_SCHEDULE_DIGEST}
-        if any(getattr(self, name) != value for name, value in expected.items()):
+        expected = (262_144, 270_000, 8_000, 8_000, 300, 300)
+        observed = (
+            self.max_input_bytes,
+            self.max_observed_input_tokens,
+            self.max_observed_output_tokens,
+            self.max_observed_reasoning_tokens,
+            self.queue_timeout_seconds,
+            self.wall_timeout_seconds,
+        )
+        if self.subscription_plan not in ALLOWED_PLANS or observed != expected:
             raise ValueError("release profile violates the frozen Crawl policy")
-        if self.endpoint != REGIONAL_ENDPOINTS[self.region]:
-            raise ValueError("release profile region and endpoint do not match")
-        if self.credential_expires_at.tzinfo is None or self.evidence_expires_at.tzinfo is None:
+        if self.auth_expires_at.tzinfo is None or self.evidence_expires_at.tzinfo is None:
             raise ValueError("release evidence expiry must include timezone")
         return self
 
@@ -83,55 +70,42 @@ class ReleaseProfile(BaseModel):
 
     def current_at(self, now: datetime | None = None) -> bool:
         checked_at = now or datetime.now(UTC)
-        return self.credential_expires_at > checked_at and self.evidence_expires_at > checked_at
+        return self.auth_expires_at > checked_at and self.evidence_expires_at > checked_at
 
 
 class FrozenDispatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: str = "crawl-openai-dispatch-v2"
+    schema_version: Literal["crawl-codex-subscription-dispatch-v1"] = (
+        "crawl-codex-subscription-dispatch-v1"
+    )
     workflow_id: str
-    slot_id: str = "model-0"
+    slot_id: Literal["model-0"] = "model-0"
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     request_body_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     release_profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    region: Literal["us", "europe"]
-    endpoint: str
-    price_schedule_id: str
-    price_schedule_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     disclosure_profile: Literal["external_disclosed_v1"]
     disclosure_notice_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     external_disclosure_ack: Literal[True]
-    service_tier: Literal["default"]
-    project_id: str = Field(pattern=r"^proj_[A-Za-z0-9_-]+$")
-    service_account_id: str = Field(min_length=3, max_length=256)
-    api_key_id: str = Field(min_length=3, max_length=256)
-    credential_generation: StrictInt = Field(ge=1)
-    model: str = PINNED_MODEL
-    input_token_upper_bound: StrictInt = Field(ge=1, le=270_000)
-    max_output_tokens: StrictInt = 4_000
-    max_usd_micros: StrictInt = MAX_USD_MICROS
+    subscription_route_id: str
+    subscription_plan: str
+    auth_generation: StrictInt = Field(ge=1)
+    model: Literal["gpt-5.6-sol"]
+    reasoning_effort: Literal["medium"]
+    max_calls: Literal[1] = 1
+    input_bytes: StrictInt = Field(ge=1, le=262_144)
+    max_observed_input_tokens: StrictInt = 270_000
+    max_observed_output_tokens: StrictInt = 8_000
+    max_observed_reasoning_tokens: StrictInt = 8_000
     queue_deadline: datetime
     wall_deadline: datetime
-    wall_timeout_seconds: StrictInt = 300
 
     @model_validator(mode="after")
     def fixed_policy(self) -> FrozenDispatch:
         if (
-            self.schema_version != "crawl-openai-dispatch-v2"
-            or self.slot_id != "model-0"
-            or self.disclosure_profile != DISCLOSURE_PROFILE
-            or self.disclosure_notice_digest != DISCLOSURE_NOTICE_DIGEST
-            or self.external_disclosure_ack is not True
-            or self.model != PINNED_MODEL
-            or self.max_output_tokens != 4_000
-            or self.max_usd_micros != MAX_USD_MICROS
-            or self.endpoint != REGIONAL_ENDPOINTS[self.region]
-            or self.price_schedule_id != PRICE_SCHEDULE
-            or self.price_schedule_digest != PRICE_SCHEDULE_DIGEST
-            or self.wall_timeout_seconds != 300
+            self.disclosure_notice_digest != DISCLOSURE_NOTICE_DIGEST
+            or self.subscription_plan not in ALLOWED_PLANS
             or self.queue_deadline.tzinfo is None
             or self.wall_deadline.tzinfo is None
-            or self.queue_deadline != self.wall_deadline
         ):
             raise ValueError("dispatch violates the frozen Crawl policy")
         return self
@@ -141,11 +115,6 @@ class FrozenDispatch(BaseModel):
 
 
 class InferencePort(Protocol):
-    async def generate(self, dispatch: FrozenDispatch,
-                       request_body: dict[str, Any]) -> ProviderResult: ...
-
-
-def usd_upper_bound(input_tokens: int, output_tokens: int) -> int:
-    numerator = (input_tokens * INPUT_USD_MICROS_PER_MILLION + output_tokens * OUTPUT_USD_MICROS_PER_MILLION) * REGIONAL_UPLIFT_BPS  # noqa: E501
-    denominator = 1_000_000 * 10_000
-    return (numerator + denominator - 1) // denominator
+    async def generate(
+        self, dispatch: FrozenDispatch, request_body: dict[str, Any]
+    ) -> ProviderResult: ...

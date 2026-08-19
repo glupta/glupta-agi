@@ -9,146 +9,131 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Version `0.3.1` is a **dispatch-held candidate**, not a production release.
-It replaces the unsupported consumer-session route with a provider-supported
-OpenAI Responses API edge, while requiring external account and release evidence
-that this repository cannot manufacture.
+Version `0.4.0` is a **deployment- and dispatch-held candidate**, not a running
+production release. Crawl adopts the official `openai-codex` SDK and its pinned
+Codex runtime, authenticated by an approved ChatGPT subscription. It does not
+accept an OpenAI API key, project, service account, metered API route, or USD
+budget.
 
 Candidate controls:
 
-- secure intake and request canonicalization are implemented;
-- DBOS owns durable execution and idempotency;
-- one DBOS-native queue bounds all Crawl model work to one concurrent workflow;
-- Pydantic AI v2's native `DBOSDurability` capability routes the one typed
-  model request through a DBOS step with provider retries disabled;
-- one predeclared `model-0` effect slot fences the external model call before
-  dispatch through a DBOS datasource transaction and fails closed when a crash
-  leaves its outcome ambiguous;
-- the official OpenAI SDK sends exactly one synchronous Responses API request
-  with SDK retries disabled, `store=false`, no tools, no redirects or ambient
-  proxy configuration, `gpt-5.6-sol`, and `medium` reasoning;
-- the frozen effect binds the request-body and release-profile digests, a
-  conservative 270,000-token input ceiling, 4,000-token total output/reasoning
-  ceiling, $2.00 USD upper-bound reservation (including the documented cache-write
-  premium and regional-processing uplift), and 300-second queue/wall limits;
-- successful replay returns the recorded provider request/response IDs, token
-  usage, conservative USD upper bound, and typed output instead of fabricating
-  missing usage;
-- runtime bearer material is read from a private file and never persisted;
-- PostgreSQL is not published and the intake API is loopback-only;
-- no live messaging or action tools are present.
+- secure intake and canonical request identity;
+- DBOS-owned durable execution and idempotency;
+- one DBOS-native queue with one concurrent Crawl workflow;
+- one predeclared `model-0` effect slot, reserved before dispatch through a
+  PostgreSQL transaction and held sticky-unknown after an ambiguous crash;
+- exactly one ephemeral Codex turn using `gpt-5.6-sol` at `medium` reasoning;
+- the bundled Codex runtime pinned to `0.147.0` and a verified non-usage-based
+  ChatGPT plan;
+- read-only sandbox, deny-all approvals, no web, no tools, no plugins, no apps,
+  no subagents, and no shell;
+- runtime and stream retries set to zero;
+- a typed output schema, source-citation resolution, and replay from the durable
+  recorded result rather than a second model call;
+- a 262,144-byte admitted-input ceiling, 300-second queue/wall deadlines, one
+  call, and fail-closed post-observed usage ceilings;
+- PostgreSQL unpublished, intake loopback-only, non-root read-only app, and no
+  messaging or action tools.
 
-Selected file contents and the question are sent to the named OpenAI project.
-The local client requires `--ack-external-disclosure`; only select files that
-are appropriate to disclose. `store=false` does not itself prove zero provider
-retention, so a current data-terms receipt remains mandatory release evidence.
+Codex does not expose a provider idempotency key or a hard pre-dispatch output
+token reservation for this subscription route. Crawl therefore never claims
+either. Its application effect fence prevents redispatch after any state that
+may have reached Codex, and observed usage is validated before release.
 
-The Crawl acceptance boundary is this repository: one useful durable `OBSERVE`
-brief, durable workflow/effect state, authenticated loopback intake, explicit
-local files, and no action tools. DIRECT, COMPOUND, and EXECUTE remain disabled
-until measured Crawl evidence earns the next Blueprint stage.
+Selected file contents and the question are disclosed to the ChatGPT
+subscription account through Codex. The local client requires
+`--ack-external-disclosure`; select only material approved for that account.
+
+The Crawl acceptance boundary is one useful durable `OBSERVE` brief, durable
+workflow/effect state, authenticated loopback intake, explicit local files, and
+no action tools. DIRECT, COMPOUND, EXECUTE, Walk, and broader Hermes activation
+remain disabled.
 
 ## Quality loop
 
-Pydantic Evals runs the frozen 20-case workload against the same fenced OpenAI
+Pydantic Evals runs the frozen workload against the same fenced subscription
 generator used by DBOS. It runs sequentially, prints a report, and saves a
-machine-readable receipt outside git. Pydantic AI's delegation, programmatic
-hand-off, and graph patterns are complexity levels, not components Crawl must
-install; the single-agent pattern is the only one this stage has earned.
+machine-readable receipt outside git.
 
 ```sh
-uv run --extra dev python -m evals.runner --output runtime/evals/latest.json
+uv run --frozen --extra dev python -m evals.runner \
+  --output runtime/evals/latest.json
 ```
 
-Use `--case EV-001-single-source` or `--limit 1` for a bounded probe. A failed
-task or deterministic assertion makes the command exit non-zero.
+Use `--case EV-001-single-source` or `--limit 1` for a bounded probe. This is a
+model dispatch and remains independently gated.
 
 ## Developer checks
 
 ```sh
-uv run --extra dev ruff check .
-uv run --extra dev pytest -q
-uv lock --check
+uv run --frozen --extra dev ruff check .
+uv run --frozen --extra dev python -m pytest -q
+uv lock --check --offline
 ```
 
 ## Held deployment contract
 
-The Community profile remains exactly one non-root app executor plus PostgreSQL.
+The Community profile is exactly one non-root app executor plus PostgreSQL.
 Only the intake port is published on loopback. The app has a read-only root,
 drops all Linux capabilities, forbids privilege escalation, and has bounded
 CPU, memory, PIDs, and temporary storage.
 
-Do not start this candidate until an exact release profile has been produced and
-approved. The private mode-`0600` JSON profile must bind the dedicated OpenAI
-project/service-account/key identifiers and generation, disclosure and rights
-evidence, data terms and region, model, rate and token/USD/time ceilings, expiry,
-price schedule, manifest, SBOM, provenance, signature, approval, and isolated
-rollback rehearsal. The API key is a separate private mode-`0600` file; startup
-validates its approved digest without a provider call, and the provider edge
-resolves it for dispatch only after the durable effect reservation exists.
-Neither file is committed.
+Do not start this candidate until these separate gates close:
 
-The image uses a digest-pinned, non-root Chainguard Python runtime. Compose 5.4
-cannot materialize non-file secrets into a read-only service, so the approved
-local broker invokes `scripts/stage_private_volumes.py` to stream one complete
-generation over stdin into fresh app/PostgreSQL Docker volumes. Compose mounts
-those volumes read-only; plaintext values and host secret paths never belong in
-this repository or a `.env` file. Preserve the immediately prior generation for
-rollback and delete a retired volume only after its rollback window closes.
+- an exact approved image reference and matching manifest, SBOM, provenance,
+  signature, rollback, and release approval;
+- a current non-usage-based ChatGPT subscription account and a private Codex
+  home whose generation matches the release profile;
+- approved disclosure, rights, retention, and account evidence;
+- a verified native Codex network route with default-deny egress appropriate to
+  the pinned runtime; and
+- isolated startup, restart, rollback, and no-provider rehearsals.
 
-The release profile selects exactly `us` or `europe`, binds the corresponding
-regional Responses endpoint, and uses the frozen 10% regional price schedule.
-Static container addresses exist only so the separately approved Colima
-nftables/dnsmasq gate can default-deny app egress.
+The previous regional Responses-API firewall renderer was retired with that
+metered API architecture. It must not be reused to imply that the native Codex
+subscription route is constrained. Deployment remains held until the actual
+runtime endpoints and a proportional egress control are proven.
 
-Prepare—but do not apply—the reviewed Colima gate with the repository renderer.
-It accepts only the exact Glupta-owned `provision: null` value or a prior marked
-Glupta block, and verifies the Compose subnet/addresses against the regional
-endpoint map before producing a candidate. Rendering does not change Colima:
+The image reference is intentionally not embedded in Compose. An older signed
+Responses-API image remains historical evidence and cannot accidentally start
+as this candidate.
 
-```sh
-candidate=$(mktemp)
-uv run --frozen python deploy/egress/render_colima.py render \
-  --region us \
-  --config /Users/glupta/.colima/default/colima.yaml \
-  --compose compose.yaml \
-  --output "$candidate"
-uv run --frozen python deploy/egress/render_colima.py verify \
-  --region us --config "$candidate" --compose compose.yaml
-```
+Compose mounts three external volumes:
 
-Selecting `us` versus `europe`, installing the candidate, stopping or restarting
-Colima, applying firewall state, and running live egress checks are an independent
-deployment gate. Keep the app absent throughout an install or rollback. The gate
-allows only established traffic, app-to-PostgreSQL TCP/5432, and TCP/443 to the
-selected endpoint's DNS-derived IPv4 set; all other app traffic is rejected.
-This is an L3/L4 destination-IP control, not TLS-host proof: shared provider IPs
-remain a documented limitation and would require a separately approved L7 design.
+- an immutable app-private volume containing the intake token, PostgreSQL
+  password, and approved release profile;
+- a separate immutable PostgreSQL-private volume; and
+- an approved Codex-subscription volume at `/run/codex`, writable only because
+  the official runtime may refresh its own subscription authentication state.
 
-Once every independent release gate is satisfied, the approved local secret
-broker supplies the four private values only to the staging subprocess. Its JSON
-receipt provides the two non-secret volume names used by Compose:
+No credential value, auth file, host secret path, or `.env` file belongs in the
+repository. `scripts/stage_private_volumes.py` stages only the app/PostgreSQL
+bundle supplied to its short-lived process by the approved local broker. Codex
+subscription-volume provisioning and rotation are a separate deployment gate;
+the application never reads or prints the auth file itself.
+
+After every independent gate is satisfied, the operator supplies only opaque
+generation and volume/image references to Compose:
 
 ```sh
-export GLUPTA_CREDENTIAL_GENERATION=1
-uv run --frozen python scripts/stage_private_volumes.py
-export GLUPTA_APP_PRIVATE_VOLUME=<app_volume-from-receipt>
-export GLUPTA_POSTGRES_PRIVATE_VOLUME=<postgres_volume-from-receipt>
-test "$(docker image inspect glupta-crawl@sha256:a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf --format '{{.Id}}')" = \
-  'sha256:a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf'
-docker compose up --detach --no-build --pull never --remove-orphans --wait --wait-timeout 120
+export GLUPTA_AUTH_GENERATION=<approved-generation>
+export GLUPTA_APP_PRIVATE_VOLUME=<app-volume-from-staging-receipt>
+export GLUPTA_POSTGRES_PRIVATE_VOLUME=<postgres-volume-from-staging-receipt>
+export GLUPTA_CODEX_SUBSCRIPTION_VOLUME=<approved-codex-volume>
+export GLUPTA_IMAGE=<exact-approved-image-reference>
+docker compose up --detach --no-build --pull never --remove-orphans \
+  --wait --wait-timeout 120
 curl --fail http://127.0.0.1:8765/healthz
 ```
 
-Routine provider-key/profile rotation stages only a new app volume and preserves
-the existing PostgreSQL private volume:
-
-```sh
-uv run --frozen python scripts/stage_private_volumes.py --app-only
-```
+These are deployment instructions, not authorization to run them. Provider
+dispatch, task draining, and a controlled canary each remain independently
+approved actions.
 
 PostgreSQL password rotation is a separate database migration gate. Replacing
 `POSTGRES_PASSWORD_FILE` does not rotate the role in an existing data volume.
+
+## Local submission
 
 Submit only explicitly selected `.md` or `.txt` files from `inputs/`. The
 bearer capability is required for `/v1/evidence-brief` and is never committed.
@@ -170,8 +155,6 @@ retry, and never prints the capability. Pass `--idempotency-key` to replay an
 exact prior request or `--token-file` when the private runtime directory is
 elsewhere.
 
-For replay-sensitive work, create a versioned input filename and leave its
-contents unchanged after submission. Record its SHA-256 and idempotency key;
-exact replay requires the same question and selected content, while changing a
-selected file under the same key is rejected. Mutable `current` aliases may
-continue to evolve, but do not select them when historical replay is required.
+For replay-sensitive work, use a versioned input filename and preserve its
+bytes. Record its SHA-256 and idempotency key; exact replay requires the same
+question and selected content.

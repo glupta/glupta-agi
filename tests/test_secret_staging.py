@@ -17,11 +17,10 @@ from scripts import stage_private_volumes as staging
 
 def _environment() -> dict[str, str]:
     return {
-        "GLUPTA_CREDENTIAL_GENERATION": "7",
+        "GLUPTA_AUTH_GENERATION": "7",
         "GLUPTA_INTAKE_TOKEN": "intake-" + "x" * 32,
         "GLUPTA_POSTGRES_PASSWORD": "database-marker",
         "GLUPTA_RELEASE_PROFILE_JSON": '{"profile":"marker"}',
-        "GLUPTA_OPENAI_API_KEY": "openai-key-" + "x" * 32,
         "PATH": "/reviewed/bin",
         "HOME": "/reviewed/home",
     }
@@ -56,19 +55,26 @@ def test_staging_streams_exact_private_files_without_child_environment_disclosur
     case.assertEqual(len(calls), 4)
     for arguments, kwargs in calls:
         joined = repr(arguments)
-        case.assertTrue(all(marker not in joined for marker in
-            ("database-marker", "profile", "openai-key")))
+        case.assertTrue(all(marker not in joined for marker in ("database-marker", "profile")))
         case.assertEqual(kwargs["env"], {"HOME": "/reviewed/home", "PATH": "/reviewed/bin"})
     app = _entries(calls[1][1]["input"])
     extractor = calls[1][0]
     option_pairs = set(pairwise(extractor))
     case.assertIn("--interactive", extractor)
-    case.assertTrue({("--network", "none"), ("--security-opt", "no-new-privileges:true"),
-        ("--cap-drop", "ALL"), ("--cap-add", "CHOWN")} <= option_pairs)
+    case.assertTrue(
+        {
+            ("--network", "none"),
+            ("--security-opt", "no-new-privileges:true"),
+            ("--cap-drop", "ALL"),
+            ("--cap-add", "CHOWN"),
+        }
+        <= option_pairs
+    )
     case.assertEqual(extractor[-5:], ["-x", "-f", "-", "-C", "/target"])
     case.assertEqual(set(app), set(staging.APP_FILES))
-    case.assertTrue(all(entry.uid == entry.gid == 65532 and entry.mode == 0o600
-        for entry, _ in app.values()))
+    case.assertTrue(
+        all(entry.uid == entry.gid == 65532 and entry.mode == 0o600 for entry, _ in app.values())
+    )
     postgres = _entries(calls[3][1]["input"])
     entry, contents = postgres["postgres-password"]
     case.assertTrue(entry.uid == entry.gid == 999 and entry.mode == 0o600)

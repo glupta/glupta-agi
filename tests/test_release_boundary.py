@@ -44,18 +44,32 @@ class ReleaseBoundaryTests(TestCase):
             main()
         self.assertEqual(dbos.call_args.kwargs["config"]["application_version"], __version__)
 
-    def test_production_boundary_excludes_consumer_codex_and_eval_harness(self) -> None:
-        project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    def test_production_boundary_adopts_only_official_subscription_codex(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         sources = {path.name: path.read_text(encoding="utf-8") for path in SOURCE.glob("*.py")}
         joined = "\n".join(sources.values())
-        self.assertNotIn("openai-codex", project)
-        self.assertNotIn("openai_codex", joined)
-        self.assertNotIn("CODEX_HOME", joined)
-        self.assertNotIn("evals.py", sources)
+        self.assertIn("openai-codex==0.147.0", project["project"]["dependencies"])
         self.assertEqual(
-            [name for name, text in sources.items() if "from openai import" in text],
-            ["openai_adapter.py"],
+            [name for name, text in sources.items() if "from openai_codex import" in text],
+            ["codex_adapter.py"],
         )
+        self.assertIn("CODEX_HOME", sources["codex_adapter.py"])
+        self.assertNotIn("from openai import", joined)
+        self.assertNotIn("api_key_id", joined)
+        self.assertNotIn("credential_sha256", joined)
+        self.assertNotIn("max_usd", joined)
+        self.assertNotIn("evals.py", sources)
+
+    def test_operator_contract_is_subscription_only_and_dispatch_held(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        normalized = " ".join(readme.split())
+        self.assertIn("official `openai-codex` SDK", readme)
+        self.assertIn("non-usage-based ChatGPT subscription", readme)
+        self.assertIn("deployment- and dispatch-held candidate", readme)
+        self.assertIn("Provider dispatch, task draining, and a controlled canary", normalized)
+        self.assertNotIn("OpenAI Responses API edge", readme)
+        self.assertNotIn("GLUPTA_CREDENTIAL_GENERATION", readme)
+        self.assertNotIn("deploy/egress/render_colima.py", readme)
 
     def test_production_semantic_line_budget_is_at_most_1500(self) -> None:
         lines = (
@@ -75,19 +89,17 @@ class ReleaseBoundaryTests(TestCase):
         self.assertIn("COPY --from=build --chown=65532:65532 /app/.venv /app/.venv", dockerfile)
         self.assertIn('ENTRYPOINT ["/app/.venv/bin/python"]', dockerfile)
         self.assertIn("postgres:17.6-bookworm@sha256:", compose)
-        self.assertIn(
-            "glupta-crawl@sha256:"
-            "a6d4026c9753313a3a22e27fde5d121e4f0b95872293eaad84eeffecb68e1bdf",
-            compose,
-        )
+        self.assertIn("image: ${GLUPTA_IMAGE:?set an exact approved image reference}", compose)
+        self.assertNotIn("sha256:a6d4026c", compose)
         self.assertNotIn("build:", compose)
         self.assertIn("--no-build --pull never", readme)
         self.assertNotIn("docker compose up -d --build", readme)
-        self.assertIn("GLUPTA_CREDENTIAL_GENERATION:?", compose)
+        self.assertIn("GLUPTA_AUTH_GENERATION:?", compose)
         self.assertNotIn("GLUPTA_UID", compose)
         self.assertNotIn("secrets:", compose)
         self.assertIn("GLUPTA_APP_PRIVATE_VOLUME", compose)
         self.assertIn("GLUPTA_POSTGRES_PRIVATE_VOLUME", compose)
-        self.assertEqual(compose.count("nocopy: true"), 2)
+        self.assertIn("GLUPTA_CODEX_SUBSCRIPTION_VOLUME", compose)
+        self.assertEqual(compose.count("nocopy: true"), 3)
         self.assertIn("ipv4_address: 172.30.47.2", compose)
         self.assertIn("enable_ipv6: false", compose)

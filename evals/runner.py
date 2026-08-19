@@ -137,7 +137,7 @@ def run_eval(
         raise ValueError("external disclosure acknowledgement is required")
     settings = Settings.from_environment()
     initialize(settings.dbos_system_database_url())
-    profile, credential_file, credential_generation = settings.require_external_profile()
+    profile, codex_home, auth_generation = settings.require_external_profile()
 
     async def generate(item: EvalInput) -> EvidenceBrief:
         admitted = admit_inline_request(
@@ -151,8 +151,8 @@ def run_eval(
             _CrawlModelPacket(
                 admitted_request=admitted.workflow_payload(),
                 release_profile=profile,
-                credential_file=str(credential_file),
-                credential_generation=credential_generation,
+                codex_home=str(codex_home),
+                auth_generation=auth_generation,
                 admitted_at=datetime.now(UTC),
                 workflow_id=_uuid7(),
             )

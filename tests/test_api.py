@@ -16,7 +16,7 @@ from glupta_agi.effects import AmbiguousEffectError
 from glupta_agi.intake import load_request
 from glupta_agi.settings import Settings
 from glupta_agi.workflow import BriefGenerationError, evidence_brief_workflow
-from tests.helpers import private_file, provider_audit, release_profile
+from tests.helpers import codex_home, provider_audit, release_profile
 
 
 def _assert_public_error_sanitized(
@@ -32,7 +32,9 @@ def _assert_public_error_sanitized(
         if "/src/glupta_agi/" in frame.f_code.co_filename:
             product_frames.append(frame.f_code.co_name)
             captured_frame = next(
-                item for item in captured.stack if item.filename == frame.f_code.co_filename
+                item
+                for item in captured.stack
+                if item.filename == frame.f_code.co_filename
                 and item.lineno == traceback_cursor.tb_lineno
             )
             for marker in markers:
@@ -54,7 +56,7 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
             input_root = Path(directory)
             (input_root / "facts.md").write_text("grounded fact\n", encoding="utf-8")
             profile = release_profile()
-            key = private_file(input_root, "api-key", "secret-api-key-" + "x" * 32)
+            home = codex_home(input_root)
             request = EvidenceBriefRequest(
                 question="What is grounded?",
                 files=["facts.md"],
@@ -103,8 +105,8 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                         token=token,
                         release_profile=profile,
                         release_profile_digest=profile.digest(),
-                        openai_api_key_file=key,
-                        credential_generation=profile.credential_generation,
+                        codex_home=home,
+                        auth_generation=profile.auth_generation,
                     ),
                 )
 
@@ -114,8 +116,8 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
             canonical.workflow_payload(),
             workflow_id,
             profile.model_dump(mode="json"),
-            str(key),
-            profile.credential_generation,
+            str(home),
+            profile.auth_generation,
             ANY,
         )
         admitted_at = datetime.fromisoformat(enqueue.await_args.args[-1])
@@ -136,7 +138,7 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                 input_root = Path(directory)
                 (input_root / "marked.md").write_text(source_marker, encoding="utf-8")
                 profile = release_profile()
-                key = private_file(input_root, "api-key", "synthetic-key-material")
+                home = codex_home(input_root)
                 request = EvidenceBriefRequest(
                     question="What is grounded?",
                     files=["marked.md"],
@@ -150,29 +152,23 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                     selected_paths=request.files,
                     disclosure_profile=request.disclosure_profile,
                 )
-                handle = SimpleNamespace(
-                    get_result=AsyncMock(side_effect=domain_error(detail))
-                )
+                handle = SimpleNamespace(get_result=AsyncMock(side_effect=domain_error(detail)))
                 enqueue = AsyncMock(return_value=handle)
                 recorded_status = AsyncMock(
-                    return_value=SimpleNamespace(
-                        input={"args": [canonical.workflow_payload()]}
-                    )
+                    return_value=SimpleNamespace(input={"args": [canonical.workflow_payload()]})
                 )
                 settings = Settings(
                     input_root=input_root,
                     token=authorization_marker,
                     release_profile=profile,
                     release_profile_digest=profile.digest(),
-                    openai_api_key_file=key,
-                    credential_generation=profile.credential_generation,
+                    codex_home=home,
+                    auth_generation=profile.auth_generation,
                 )
 
                 with (
                     patch("glupta_agi.api.crawl_observe_queue.enqueue_async", new=enqueue),
-                    patch(
-                        "glupta_agi.api.DBOS.get_workflow_status_async", new=recorded_status
-                    ),
+                    patch("glupta_agi.api.DBOS.get_workflow_status_async", new=recorded_status),
                 ):
                     try:
                         await evidence_brief(
@@ -188,9 +184,7 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(caught.status_code, expected_status)
                 self.assertEqual(caught.detail, detail)
-                _assert_public_error_sanitized(
-                    self, caught, authorization_marker, source_marker
-                )
+                _assert_public_error_sanitized(self, caught, authorization_marker, source_marker)
                 enqueue.assert_awaited_once()
                 recorded_status.assert_awaited_once_with(workflow_id)
                 handle.get_result.assert_awaited_once_with()
