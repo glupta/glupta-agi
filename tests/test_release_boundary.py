@@ -99,7 +99,11 @@ class ReleaseBoundaryTests(TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertEqual(dockerfile.count("@sha256:"), 3)
+        self.assertEqual(dockerfile.count("@sha256:"), 4)
+        self.assertIn("debian:bookworm-slim@sha256:", dockerfile)
+        self.assertIn("COPY --from=env /usr/bin/env /usr/bin/env", dockerfile)
+        self.assertIn("/usr/share/licenses/coreutils/GPL-3", dockerfile)
+        self.assertNotIn("/bin/busybox", dockerfile)
         self.assertIn("--no-install-project", dockerfile)
         self.assertIn("COPY --from=build --chown=65532:65532 /app/.venv /app/.venv", dockerfile)
         self.assertIn('ENTRYPOINT ["/app/.venv/bin/python"]', dockerfile)
@@ -118,3 +122,9 @@ class ReleaseBoundaryTests(TestCase):
         self.assertEqual(compose.count("nocopy: true"), 3)
         self.assertIn("ipv4_address: 172.30.47.2", compose)
         self.assertIn("enable_ipv6: false", compose)
+        service_block = compose.split("services:\n", 1)[1].split("\nvolumes:\n", 1)[0]
+        self.assertEqual(
+            {line[2:-1] for line in service_block.splitlines() if line.startswith("  ")
+             and not line.startswith("    ") and line.endswith(":")},
+            {"app", "postgres"},
+        )
