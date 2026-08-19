@@ -1,0 +1,20 @@
+{
+  "candidate_image": "sha256:08ef38c9d4c85501005a85abf923debb2a95244c8cb4f4243528d84520d910ad",
+  "cleanup_complete": true,
+  "cold_start": true,
+  "forward_restore": true,
+  "intake_request": false,
+  "live_baseline_restored": true,
+  "postgres_image": "sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3",
+  "provider_dispatch": false,
+  "restart": true,
+  "rollback": true,
+  "rollback_image": "sha256:6f8af6a08661f8315d1285e8764ec8b260097426ccd3b8c6d937218250bc9850",
+  "schema_version": "glupta-subscription-rollback-rehearsal-v1",
+  "source_revision": "72b0d7dc4c984d5c32fd1708788efcec06a26930",
+  "steady_services": [
+    "app",
+    "postgres"
+  ],
+  "synthetic_only": true
+}

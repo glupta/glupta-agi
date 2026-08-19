@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "candidate": "f2add8607a1f614bcd0fe6f651c7599422fa3135",
+  "candidate_tree": "227caa8c4ce88f424f06ab907f420bf6357dda41",
+  "approved_range_base": "0e3fe9b6ad40df80a070c1f32e4f7008c9eb5c04",
+  "packet_sha256": "d440b9c18accbde713f52f3451b3444013398703994cd626837260cd676dc061",
+  "result": "PASS",
+  "definition": "all three completed independent reviews found zero substantiated material blockers on the exact candidate and packet",
+  "reviews": {
+    "codex": {
+      "route": "native subscription codex exec",
+      "model": "gpt-5.6-sol",
+      "reasoning": "max",
+      "verdict": "PASS",
+      "blockers": [],
+      "result_path": "/private/tmp/glupta-041-frontier/codex-result-2.json",
+      "result_sha256": "e6c537086ae729514e81ae6d912aef95861ac46b9c389bc28b4dc8448a2b594b"
+    },
+    "fable": {
+      "route": "advisor_full native Claude subscription",
+      "model": "claude-fable-5",
+      "reasoning": "max",
+      "goal_id": "glupta-041-recovery-release",
+      "gate_id": "final",
+      "revision_round": 0,
+      "verdict": "proceed",
+      "material_blockers": 0,
+      "ledger_path": "/Users/glupta/.fable-advisor/gate-ledger/goals/glupta-041-recovery-release.json",
+      "ledger_sha256": "09b88d0935436cd0977535eb373426838fd1d36c481817d0a812fd89fda4ce73",
+      "consult_log_line": 1229,
+      "consult_log_entry_sha256": "cd782dbfba282efa3d08a17a901b754d80c05cde23af9699ac9aad77c3abf16a"
+    },
+    "grok": {
+      "route": "pinned native Grok CLI subscription/OIDC launcher",
+      "model": "grok-4.6",
+      "reasoning": "xhigh",
+      "verdict": "PASS",
+      "blockers": [],
+      "receipt_path": "/private/tmp/glupta-041-frontier/grok-receipt.json",
+      "receipt_sha256": "584da8240d39fe77d0e84f2da9c3d2a3ecf8d320aaa8ad4bc9b7879bafc625ec"
+    }
+  },
+  "independence": {
+    "codex_ran_first": true,
+    "fable_and_grok_started_only_after_codex_pass": true,
+    "fable_and_grok_ran_in_parallel": true,
+    "peer_results_sealed_until_fan_in": true
+  },
+  "authority_not_granted": [
+    "provider dispatch",
+    "new canary",
+    "task drain",
+    "Walk activation",
+    "outbound effects"
+  ]
+}
