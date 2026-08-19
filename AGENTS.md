@@ -40,6 +40,12 @@ Preserve these constraints:
   transition or a material change to security, privacy, authority, provider
   dispatch, effects, recovery, or release architecture—not for every version,
   documentation update, review receipt, or ordinary corrective patch.
+- Every Glupta release review packet must include the container/runtime
+  configuration and a bounded incident ledger of setup, build, deployment,
+  restart, rollback, and canary failures observed since the prior release. Bind
+  each incident to its root cause, correction or hold, regression/execution
+  evidence, and any remaining deployment constraint; do not omit resolved
+  operational failures merely because the current code delta is elsewhere.
 - A required frontier-review cycle is bounded before it starts: at most two
   candidate hashes and one remediation pass. Within that cycle, a semantic
   reviewed-byte change invalidates the earlier verdict and consumes the one
