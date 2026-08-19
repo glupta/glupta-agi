@@ -9,7 +9,7 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Version `0.4.0` is a **deployment- and dispatch-held candidate**, not a running
+Version `0.4.1` is a **deployment- and dispatch-held candidate**, not a running
 production release. Crawl adopts the official `openai-codex` SDK and its pinned
 Codex runtime, authenticated by an approved ChatGPT subscription. It does not
 accept an OpenAI API key, project, service account, metered API route, or USD

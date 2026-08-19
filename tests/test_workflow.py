@@ -5,10 +5,13 @@ import asyncio
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
+from pydantic_ai.messages import ModelResponse
+from pydantic_ai.models.function import FunctionModel
 
 from glupta_agi.contracts import (
     DISCLOSURE_NOTICE_DIGEST,
@@ -21,10 +24,13 @@ from glupta_agi.effects import AmbiguousEffectError, Effect
 from glupta_agi.inference import FrozenDispatch
 from glupta_agi.intake import admit_inline_request
 from glupta_agi.workflow import (
+    AmbiguousResult,
     BriefGenerationError,
     _crawl_agent,
     _crawl_durability,
+    _crawl_model,
     _CrawlModelPacket,
+    _evidence_brief_workflow_sensitive,
     _run_inference,
     crawl_observe_queue,
 )
@@ -116,9 +122,21 @@ class FakeAdapter:
         return ProviderResult(brief=brief, audit=audit)
 
 
+class AmbiguousAdapter(FakeAdapter):
+    async def generate(
+        self, dispatch: FrozenDispatch, request_body: dict[str, object]
+    ) -> ProviderResult:
+        type(self).calls += 1
+        type(self).dispatch, type(self).body = dispatch, request_body
+        from glupta_agi.codex_adapter import ProviderAmbiguousError
+
+        raise ProviderAmbiguousError("synthetic ambiguous turn")
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeAdapter.calls = 0
+        AmbiguousAdapter.calls = 0
 
     def test_queue_agent_and_retry_contract_are_fixed(self) -> None:
         self.assertEqual(
@@ -202,6 +220,65 @@ class WorkflowTests(unittest.TestCase):
                 with self.assertRaises(AmbiguousEffectError):
                     asyncio.run(_run_inference(_packet(), adapter_factory=FakeAdapter))
         self.assertEqual(FakeAdapter.calls, 0)
+
+    def test_actual_agent_accepts_structured_ambiguity_without_output_retry(self) -> None:
+        agent = Agent(
+            FunctionModel(_crawl_model, model_name="codex-subscription-adapter"),
+            output_type=ProviderResult | AmbiguousResult,
+            retries=0,
+        )
+        with patch(
+            "glupta_agi.workflow._run_inference",
+            side_effect=AmbiguousEffectError("manual reconciliation"),
+        ) as inference:
+            run = asyncio.run(agent.run(_packet().model_dump_json()))
+
+        self.assertEqual(run.output, AmbiguousResult(kind="unknown"))
+        self.assertEqual(sum(isinstance(item, ModelResponse) for item in run.all_messages()), 1)
+        inference.assert_awaited_once()
+
+    def test_structured_ambiguity_becomes_the_sanitized_workflow_error(self) -> None:
+        packet = _packet()
+
+        async def ambiguous(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(output=AmbiguousResult(kind="unknown"))
+
+        with (
+            patch("glupta_agi.workflow._crawl_agent.run", side_effect=ambiguous),
+            self.assertRaisesRegex(AmbiguousEffectError, "manual reconciliation"),
+        ):
+            asyncio.run(_evidence_brief_workflow_sensitive(
+                packet.admitted_request,
+                packet.workflow_id,
+                packet.release_profile.model_dump(mode="json"),
+                packet.codex_home,
+                packet.auth_generation,
+                packet.admitted_at.isoformat(),
+            ))
+
+    def test_initial_ambiguity_and_replay_make_only_one_adapter_call(self) -> None:
+        packet = _packet()
+        reservation_count = 0
+
+        def reserve(dispatch: dict[str, object], _digest: str) -> Effect:
+            nonlocal reservation_count
+            reservation_count += 1
+            return _effect("reserved" if reservation_count == 1 else "unknown", dispatch)
+
+        with (
+            patch("glupta_agi.workflow.reserve", side_effect=reserve),
+            patch("glupta_agi.workflow.transition", side_effect=_transition),
+            patch(
+                "glupta_agi.workflow.hold_unknown",
+                side_effect=AmbiguousEffectError("manual reconciliation"),
+            ),
+        ):
+            with self.assertRaises(AmbiguousEffectError):
+                asyncio.run(_run_inference(packet, adapter_factory=AmbiguousAdapter))
+            with self.assertRaises(AmbiguousEffectError):
+                asyncio.run(_run_inference(packet, adapter_factory=AmbiguousAdapter))
+
+        self.assertEqual(AmbiguousAdapter.calls, 1)
 
     def test_expired_queue_or_changed_auth_fails_before_dispatch(self) -> None:
         cases = (

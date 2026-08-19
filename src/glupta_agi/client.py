@@ -145,7 +145,7 @@ def submit(
     except (urllib.error.URLError, TimeoutError, OSError):
         transport_failed = True
     if http_code is not None:
-        raise ClientError(f"server returned HTTP {http_code}") from None
+        raise ClientError(f"server returned HTTP {http_code} for workflow {workflow_id}") from None
     if transport_failed:
         raise ClientError("Crawl API is unavailable") from None
     if len(body) > MAX_RESPONSE_BYTES:
