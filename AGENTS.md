@@ -40,6 +40,13 @@ Preserve these constraints:
   transition or a material change to security, privacy, authority, provider
   dispatch, effects, recovery, or release architecture—not for every version,
   documentation update, review receipt, or ordinary corrective patch.
+- Every Glupta release review packet must include a concise, deduplicated ledger
+  of material bugs, failures, and recurrence-preventing learnings observed since
+  the prior release, always covering relevant container/runtime configuration,
+  setup, build, deployment, restart, rollback, and canary behavior. Group related
+  incidents and bind each entry only to root cause, correction or hold,
+  regression/execution evidence, and residual constraint. Exclude raw logs,
+  chronology noise, and unrelated backlog so the review stays change-focused.
 - A required frontier-review cycle is bounded before it starts: at most two
   candidate hashes and one remediation pass. Within that cycle, a semantic
   reviewed-byte change invalidates the earlier verdict and consumes the one

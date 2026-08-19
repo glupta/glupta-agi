@@ -10,7 +10,7 @@ from dbos import DBOS, Queue
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 
@@ -23,6 +23,11 @@ from .intake import IntakeError, validate_workflow_payload
 
 class BriefGenerationError(RuntimeError):
     pass
+
+
+class AmbiguousResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    kind: Literal["unknown"]
 
 
 class _CrawlModelPacket(BaseModel):
@@ -187,7 +192,10 @@ async def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelRe
 
 
 async def _crawl_model_sensitive(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    del info
+    if info.allow_text_output or {tool.name for tool in info.output_tools} != {
+        "final_result_ProviderResult", "final_result_AmbiguousResult"
+    }:
+        raise BriefGenerationError("Crawl model output contract changed")
     parts = (part for message in reversed(messages) for part in reversed(message.parts))
     contents = (part.content for part in parts if isinstance(part, UserPromptPart))
     raw_packet = next((content for content in contents if isinstance(content, str)), None)
@@ -203,12 +211,16 @@ async def _crawl_model_sensitive(messages: list[ModelMessage], info: AgentInfo) 
     try:
         result, usage = await _run_inference(packet)
     except AmbiguousEffectError:
-        return ModelResponse(parts=[TextPart('"unknown"')], usage=RequestUsage())
-    return ModelResponse(parts=[TextPart(result.model_dump_json())], usage=usage)
+        return ModelResponse(parts=[ToolCallPart(
+            "final_result_AmbiguousResult", {"kind": "unknown"}
+        )], usage=RequestUsage())
+    return ModelResponse(parts=[ToolCallPart(
+        "final_result_ProviderResult", result.model_dump(mode="json")
+    )], usage=usage)
 
 
 _crawl_durability = DBOSDurability(name="crawl_observe_agent", model_step_config={"retries_allowed": False}, parallel_execution_mode="sequential", register_legacy_workflows=False)
-_crawl_agent = Agent(FunctionModel(_crawl_model, model_name="codex-subscription-adapter"), name="crawl_observe_agent", output_type=contracts.ProviderResult | Literal["unknown"], retries=0, capabilities=[_crawl_durability])
+_crawl_agent = Agent(FunctionModel(_crawl_model, model_name="codex-subscription-adapter"), name="crawl_observe_agent", output_type=contracts.ProviderResult | AmbiguousResult, retries=0, capabilities=[_crawl_durability])
 crawl_observe_queue = Queue("crawl-observe-v1", concurrency=1, worker_concurrency=1)
 
 
@@ -243,7 +255,7 @@ async def _evidence_brief_workflow_sensitive(
     if invalid_admission:
         raise BriefGenerationError("workflow admission is invalid") from None
     result = (await _crawl_agent.run(packet.model_dump_json(), retries=0)).output
-    if result == "unknown":
+    if isinstance(result, AmbiguousResult):
         raise AmbiguousEffectError("model effect outcome requires manual reconciliation")
     return contracts.EvidenceBriefResponse(**result.brief.model_dump(mode="json"),
         request_digest=admitted.request_digest, workflow_id=workflow_id,

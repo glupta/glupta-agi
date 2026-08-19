@@ -322,6 +322,7 @@ class ClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             secret = "do-not-disclose-" + "x" * 32
             token = self._token(Path(temporary), secret)
+            workflow_id = "01a01407-fe3e-72aa-9b8f-7666915df735"
 
             def http_error(*_args: object, **_kwargs: object) -> object:
                 raise urllib.error.HTTPError("url", 503, secret, {}, None)
@@ -332,9 +333,14 @@ class ClientTests(unittest.TestCase):
                     ["one.md"],
                     "http://127.0.0.1:8765",
                     token,
+                    workflow_id,
                     external_disclosure_ack=True,
                     opener=http_error,
                 )
+            self.assertEqual(
+                str(caught.exception),
+                f"server returned HTTP 503 for workflow {workflow_id}",
+            )
             self.assertNotIn(secret, str(caught.exception))
             self.assertIsNone(caught.exception.__cause__)
             self.assertIsNone(caught.exception.__context__)
