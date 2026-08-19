@@ -18,7 +18,8 @@ PROJECT_NAME, NETWORK_NAME = "glupta-crawl", "glupta-crawl_private"
 COMPOSE_SEARCH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 COMPOSE_TIMEOUT_SECONDS = 10
 BEGIN, END = "# GLUPTA_EGRESS_BEGIN", "# GLUPTA_EGRESS_END"
-PROVISIONED = re.compile(rf"(?ms)^provision:\n  {re.escape(BEGIN)} .*?\n  {re.escape(END)}\n")
+PROVISION_DECLARATION = re.compile(r"(?m)^provision:(?:[ \t]+null)?[ \t]*$")
+TOP_LEVEL_LINE = re.compile(r"(?m)^(?=\S)")
 
 
 class RenderError(RuntimeError):
@@ -172,19 +173,47 @@ def _block(template: Path) -> str:
     return (
         "provision:\n"
         f"  {BEGIN} route=codex-subscription-v1 script_sha256={digest}\n"
-        "  - mode: after-boot\n"
+        "  - mode: system\n"
         "    script: |\n"
         f"{body}"
         f"  {END}\n"
     )
 
 
+def _normalized_block(template: Path) -> str:
+    block = _block(template)
+    return "".join(
+        line
+        for line in block.splitlines(keepends=True)
+        if BEGIN not in line and END not in line
+    )
+
+
+def _provision_span(candidate: str) -> tuple[int, int, str] | None:
+    declarations = list(PROVISION_DECLARATION.finditer(candidate))
+    if len(declarations) != 1:
+        return None
+    declaration = declarations[0]
+    following = TOP_LEVEL_LINE.search(candidate, declaration.end() + 1)
+    end = following.start() if following is not None else len(candidate)
+    return declaration.start(), end, candidate[declaration.start() : end]
+
+
 def verify_text(candidate: str, repo: Path, template: Path) -> None:
     _validate_contract(repo)
     expected = _block(template)
-    if PROVISIONED.findall(candidate) != [expected]:
+    normalized = _normalized_block(template)
+    provision = _provision_span(candidate)
+    if provision is None:
         raise RenderError("rendered Colima egress block is not exact")
-    if candidate.count(BEGIN) != 1 or candidate.count(END) != 1:
+    _, _, provision_text = provision
+    marked_exact = provision_text == expected
+    normalized_exact = provision_text == normalized
+    if not (marked_exact or normalized_exact):
+        raise RenderError("rendered Colima egress block is not exact")
+    if marked_exact and (candidate.count(BEGIN) != 1 or candidate.count(END) != 1):
+        raise RenderError("rendered Colima egress markers are ambiguous")
+    if normalized_exact and (BEGIN in candidate or END in candidate):
         raise RenderError("rendered Colima egress markers are ambiguous")
     if "provision: null" in candidate or "__GLUPTA_" in candidate:
         raise RenderError("rendered Colima config retains an unresolved provision value")
@@ -194,12 +223,22 @@ def render(config: Path, output: Path, repo: Path, template: Path) -> None:
     _validate_contract(repo)
     current = config.read_text(encoding="utf-8")
     replacement = _block(template)
-    if current.count("provision: null") == 1 and BEGIN not in current and END not in current:
-        candidate = current.replace("provision: null", replacement.rstrip("\n"), 1)
-    elif len(PROVISIONED.findall(current)) == 1 and current.count(BEGIN) == current.count(END) == 1:
-        candidate = PROVISIONED.sub(lambda _: replacement, current, count=1)
+    normalized = _normalized_block(template)
+    provision = _provision_span(current)
+    if provision is None:
+        raise RenderError("refusing to replace an unowned or ambiguous provision block")
+    start, end, provision_text = provision
+    if provision_text not in ("provision: null\n", replacement, normalized):
+        raise RenderError("refusing to replace an unowned or ambiguous provision block")
+    if provision_text == replacement and current.count(BEGIN) == current.count(END) == 1:
+        pass
+    elif provision_text == normalized and BEGIN not in current and END not in current:
+        pass
+    elif provision_text == "provision: null\n" and BEGIN not in current and END not in current:
+        pass
     else:
         raise RenderError("refusing to replace an unowned or ambiguous provision block")
+    candidate = current[:start] + replacement + current[end:]
     verify_text(candidate, repo, template)
     output.write_text(candidate, encoding="utf-8")
 
