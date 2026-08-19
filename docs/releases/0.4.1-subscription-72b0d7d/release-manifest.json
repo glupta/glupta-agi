@@ -1,0 +1,67 @@
+{
+  "schema_version": "glupta-subscription-release-evidence-v1",
+  "status": "release_held",
+  "source": {
+    "repository": "https://github.com/glupta/glupta-agi.git",
+    "revision": "72b0d7dc4c984d5c32fd1708788efcec06a26930",
+    "tree": "227caa8c4ce88f424f06ab907f420bf6357dda41",
+    "version": "0.4.1"
+  },
+  "image": {
+    "local_reference": "glupta-crawl:subscription-0.4.1-72b0d7d",
+    "index_digest": "sha256:08ef38c9d4c85501005a85abf923debb2a95244c8cb4f4243528d84520d910ad",
+    "platform": "linux/arm64",
+    "platform_manifest_digest": "sha256:cecf21a2bd3130b1f221e347cbdba0c62a7d34bcd6480299c47dd9e571659df2",
+    "runtime_user": "65532:65532"
+  },
+  "build": {
+    "buildx_record": "kugch6z6vt3ej724dsqt8rkyf",
+    "buildkit_version": "v0.27.1",
+    "dependency_resolution": "uv sync --frozen",
+    "dependency_network": "connected_locked_fetch",
+    "base_images_digest_pinned": true,
+    "attestation_manifest_digest": "sha256:074ec65c3b0cb60d3663633f3d0a03ece9cb15a70bf164adec0a5580944cda1d",
+    "embedded_spdx_statement_digest": "sha256:bcf4cb99a1be42dc7c1be2183c7ef9ccc1631d9efdc22f6507536b37435eeeec",
+    "embedded_provenance_statement_digest": "sha256:29a7e422289b641dd79f3bb74a945281654e7aa9b2245e8c79e7913ffdfd1567",
+    "provenance_predicate_digest": "sha256:87ea68174c727f8df0fe2b3566432a136cf30a56b91b4f4b2b5b534bffbb6775",
+    "builder_identity": "untrusted_local_buildkit",
+    "reproducible_claim": false
+  },
+  "evidence": {
+    "provenance.intoto.json": "29a7e422289b641dd79f3bb74a945281654e7aa9b2245e8c79e7913ffdfd1567",
+    "sbom.cdx.json": "794c87a5c3087749660a5baf134857ad329528c8dcbdc9dc8d1bba7cbab7340d",
+    "vulnerabilities.trivy.json": "1faff541e536401d49b9e09f1b90d7c90654e7dd96ac8fccbc62d7c26961c700",
+    "rollback-rehearsal.json": "2074f5c26a688571a96bacc99a199855b8840f19d8a64aedda3d36433aefa4ca",
+    "codex-subscription-volume-attestation-g1.json": "a2cfa7440083e2a85b77a7c33a583505faec75c5690c2a9a8f8c47dfb53f9239",
+    "frontier-review-packet.md": "d440b9c18accbde713f52f3451b3444013398703994cd626837260cd676dc061",
+    "frontier-fan-in.json": "e8728f7a3007cfb8594809393bbf85cbeb4961e5c3521058508736f15f09e57d"
+  },
+  "verification": {
+    "trivy_version": "0.74.0",
+    "trivy_database_updated_at": "2026-08-18T18:30:40.017638579Z",
+    "vulnerabilities_total": 0,
+    "secret_findings_total": 0,
+    "runtime_package_version": "0.4.1",
+    "codex_sdk_version": "0.147.0",
+    "cold_start": true,
+    "restart": true,
+    "rollback": true,
+    "forward_restore": true,
+    "provider_dispatch": false,
+    "intake_request": false,
+    "synthetic_only": true,
+    "cleanup_complete": true,
+    "frontier_result": "PASS"
+  },
+  "signature": {
+    "status": "held",
+    "reason": "The exact 0.4.1 artifact manifest has not yet received its independent signing approval."
+  },
+  "remaining_gates": [
+    "approved exact-manifest signing identity and signature",
+    "matching release-profile projection and private-volume attestation",
+    "zero-provider deployment, health, restart, rollback, and forward-restore proof",
+    "fresh controlled read-only canary approval",
+    "eligible Crawl task drain after canary reconciliation"
+  ]
+}
