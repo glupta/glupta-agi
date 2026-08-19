@@ -96,7 +96,12 @@ def _compose_model(repo: Path) -> dict[str, object]:
 def _validate_contract(repo: Path) -> None:
     compose = _compose_model(repo)
     services = compose.get("services")
-    if not isinstance(services, dict) or set(services) != {"app", "postgres"}:
+    service_identity_valid = isinstance(services, dict) and set(services) == {
+        "app",
+        "postgres",
+    }
+    if not service_identity_valid:
+        del services, compose
         raise RenderError("Compose steady-state service identity changed")
     expected_network = {
         "name": NETWORK_NAME,
@@ -108,7 +113,7 @@ def _validate_contract(repo: Path) -> None:
         "postgres": {"private": {"ipv4_address": POSTGRES_IP}},
     }
     networks = compose.get("networks")
-    if (
+    egress_identity_valid = not (
         compose.get("name") != PROJECT_NAME
         or not isinstance(networks, dict)
         or set(networks) != {"private"}
@@ -118,7 +123,9 @@ def _validate_contract(repo: Path) -> None:
             or services[service].get("networks") != expected_networks
             for service, expected_networks in expected_service_networks.items()
         )
-    ):
+    )
+    del compose, services, networks, expected_network, expected_service_networks
+    if not egress_identity_valid:
         raise RenderError("Compose egress identity does not match the reviewed contract")
 
     project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))

@@ -294,6 +294,55 @@ def test_compose_validator_failures_do_not_leak_output(
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.parametrize(
+    ("failure_path", "message"),
+    (
+        ("service", "Compose steady-state service identity changed"),
+        ("egress", "Compose egress identity does not match the reviewed contract"),
+    ),
+)
+def test_compose_semantic_failures_do_not_retain_model(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_path: str,
+    message: str,
+) -> None:
+    marker = "unique-sensitive-semantic-marker"
+    model = _compose_contract_model()
+    if failure_path == "service":
+        services = model["services"]
+        assert isinstance(services, dict)
+        services[marker] = {"image": marker}
+    else:
+        networks = model["networks"]
+        assert isinstance(networks, dict)
+        private = networks["private"]
+        assert isinstance(private, dict)
+        private[marker] = marker
+    monkeypatch.setattr(render_colima, "_compose_model", lambda _repo: model)
+
+    with pytest.raises(render_colima.RenderError) as raised:
+        render_colima._validate_contract(ROOT)
+    assert str(raised.value) == message
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+    product_tracebacks = []
+    current = raised.value.__traceback__
+    while current is not None:
+        if current.tb_frame.f_code.co_filename == str(RENDERER):
+            product_tracebacks.append(current)
+            assert marker not in repr(current.tb_frame.f_locals)
+        current = current.tb_next
+    assert product_tracebacks
+    captured_traceback = traceback.TracebackException(
+        type(raised.value),
+        raised.value,
+        product_tracebacks[0],
+        capture_locals=True,
+    )
+    assert marker not in "".join(captured_traceback.format())
+
+
 def test_render_refuses_runtime_or_route_control_drift(tmp_path: Path) -> None:
     repo = _repo_copy(tmp_path)
     project = repo / "pyproject.toml"
