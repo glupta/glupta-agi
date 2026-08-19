@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
-
-from pydantic_ai import Agent
-from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.messages import ModelResponse
-from pydantic_ai.models.function import FunctionModel
 
 from glupta_agi.contracts import (
     DISCLOSURE_NOTICE_DIGEST,
@@ -26,9 +21,7 @@ from glupta_agi.intake import admit_inline_request
 from glupta_agi.workflow import (
     AmbiguousResult,
     BriefGenerationError,
-    _crawl_agent,
-    _crawl_durability,
-    _crawl_model,
+    _crawl_model_step,
     _CrawlModelPacket,
     _evidence_brief_workflow_sensitive,
     _run_inference,
@@ -138,23 +131,26 @@ class WorkflowTests(unittest.TestCase):
         FakeAdapter.calls = 0
         AmbiguousAdapter.calls = 0
 
-    def test_queue_agent_and_retry_contract_are_fixed(self) -> None:
+    def test_queue_step_and_retry_contract_are_fixed(self) -> None:
         self.assertEqual(
             (crawl_observe_queue.concurrency, crawl_observe_queue.worker_concurrency), (1, 1)
         )
-        self.assertIsInstance(_crawl_agent, Agent)
-        self.assertIsInstance(_crawl_durability, DBOSDurability)
-        self.assertEqual(_crawl_durability._model_step_config, {"retries_allowed": False})
+        self.assertEqual(
+            _crawl_model_step.dbos_function_name, "crawl_observe_model_v2"
+        )
+        self.assertIn(
+            '@DBOS.step(name="crawl_observe_model_v2", retries_allowed=False)',
+            inspect.getsource(_crawl_model_step),
+        )
 
     def test_success_freezes_subscription_request_and_persists_exact_audit(self) -> None:
         with (
             patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
             patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
         ):
-            result, usage = asyncio.run(_run_inference(_packet(), adapter_factory=FakeAdapter))
+            result = asyncio.run(_run_inference(_packet(), adapter_factory=FakeAdapter))
         self.assertEqual(FakeAdapter.calls, 1)
         self.assertEqual(result.brief.citations[0].quote, "grounded fact")
-        self.assertEqual(usage.input_tokens, 100)
         self.assertEqual(FakeAdapter.dispatch.subscription_plan, "pro")
         self.assertEqual(FakeAdapter.body["reasoning_effort"], "medium")
         self.assertEqual(FakeAdapter.body["sandbox"], "read-only")
@@ -199,7 +195,7 @@ class WorkflowTests(unittest.TestCase):
             )
 
         with patch("glupta_agi.workflow.reserve", side_effect=reserve):
-            result, _usage = asyncio.run(
+            result = asyncio.run(
                 _run_inference(
                     packet,
                     adapter_factory=lambda *_args, **_kwargs: self.fail("adapter constructed"),
@@ -221,30 +217,24 @@ class WorkflowTests(unittest.TestCase):
                     asyncio.run(_run_inference(_packet(), adapter_factory=FakeAdapter))
         self.assertEqual(FakeAdapter.calls, 0)
 
-    def test_actual_agent_accepts_structured_ambiguity_without_output_retry(self) -> None:
-        agent = Agent(
-            FunctionModel(_crawl_model, model_name="codex-subscription-adapter"),
-            output_type=ProviderResult | AmbiguousResult,
-            retries=0,
-        )
+    def test_model_step_checkpoints_structured_ambiguity_without_retry(self) -> None:
         with patch(
             "glupta_agi.workflow._run_inference",
             side_effect=AmbiguousEffectError("manual reconciliation"),
         ) as inference:
-            run = asyncio.run(agent.run(_packet().model_dump_json()))
+            result = asyncio.run(_crawl_model_step(_packet()))
 
-        self.assertEqual(run.output, AmbiguousResult(kind="unknown"))
-        self.assertEqual(sum(isinstance(item, ModelResponse) for item in run.all_messages()), 1)
+        self.assertEqual(result, AmbiguousResult(kind="unknown"))
         inference.assert_awaited_once()
 
     def test_structured_ambiguity_becomes_the_sanitized_workflow_error(self) -> None:
         packet = _packet()
 
-        async def ambiguous(*_args: object, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(output=AmbiguousResult(kind="unknown"))
+        async def ambiguous(*_args: object, **_kwargs: object) -> AmbiguousResult:
+            return AmbiguousResult(kind="unknown")
 
         with (
-            patch("glupta_agi.workflow._crawl_agent.run", side_effect=ambiguous),
+            patch("glupta_agi.workflow._crawl_model_step", side_effect=ambiguous),
             self.assertRaisesRegex(AmbiguousEffectError, "manual reconciliation"),
         ):
             asyncio.run(_evidence_brief_workflow_sensitive(

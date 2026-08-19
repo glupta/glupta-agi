@@ -111,14 +111,14 @@ wheels = [
 
 [[package]]
 name = "glupta-agi"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "dbos" },
     { name = "fastapi" },
     { name = "openai-codex" },
     { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic-ai-slim", extra = ["dbos"] },
+    { name = "pydantic" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
 ]
@@ -136,7 +136,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.141,<1" },
     { name = "openai-codex", specifier = "==0.147.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3,<4" },
-    { name = "pydantic-ai-slim", extras = ["dbos"], specifier = "==2.31.0" },
+    { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-evals", marker = "extra == 'dev'", specifier = "==2.31.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9,<10" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<1" },
@@ -473,11 +473,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e7/4e/2165d9b90edcd5dfc8e9465b3bdc0aa66a67760843ddb0ac99ee396898f0/pydantic_ai_slim-2.31.0.tar.gz", hash = "sha256:a9310d2464154b028096f1d680f17837f16e5c6cd209b4542e4f60ca5d344789", size = 1214087, upload-time = "2026-08-15T03:17:28.353Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/db/09/233e529fadbece38580c3a390783f55fa196afad875ce535ee9a57a5ad71/pydantic_ai_slim-2.31.0-py3-none-any.whl", hash = "sha256:cb809ad949ca68be6bb9a0e0b994fc73a95f4cd405e8609a71034f2e2080e2a1", size = 1432053, upload-time = "2026-08-15T03:17:21.208Z" },
-]
-
-[package.optional-dependencies]
-dbos = [
-    { name = "dbos" },
 ]
 
 [[package]]

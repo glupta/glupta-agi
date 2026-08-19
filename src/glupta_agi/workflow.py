@@ -8,11 +8,6 @@ from typing import Any, Literal
 
 from dbos import DBOS, Queue
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
-from pydantic_ai import Agent
-from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, UserPromptPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.usage import RequestUsage
 
 from . import codex_adapter, contracts
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
@@ -73,12 +68,6 @@ def _dispatch(packet: _CrawlModelPacket, admitted: Any, request_body: dict[str, 
         + timedelta(seconds=profile.wall_timeout_seconds))
 
 
-def _usage(audit: contracts.ProviderAudit) -> RequestUsage:
-    return RequestUsage(input_tokens=audit.input_tokens, output_tokens=audit.output_tokens,
-        cache_write_tokens=audit.cache_write_input_tokens, cache_read_tokens=audit.cached_input_tokens,
-        details={"reasoning_output_tokens": audit.reasoning_tokens})
-
-
 def _persist(frozen: FrozenDispatch, state: str, audit: dict[str, Any] | None, *,
     result: dict[str, Any] | None = None, reason: str | None = None) -> None:
     try:
@@ -95,7 +84,7 @@ def _persist(frozen: FrozenDispatch, state: str, audit: dict[str, Any] | None, *
             hold_unknown(frozen.workflow_id, ambiguity, audit=audit)
 
 
-async def _run_inference(packet: _CrawlModelPacket, *, adapter_factory: Any = codex_adapter.CodexSubscriptionAdapter) -> tuple[contracts.ProviderResult, RequestUsage]:
+async def _run_inference(packet: _CrawlModelPacket, *, adapter_factory: Any = codex_adapter.CodexSubscriptionAdapter) -> contracts.ProviderResult:
     error: tuple[type[BriefGenerationError | AmbiguousEffectError], str] | None = None
     try:
         result = await _run_inference_sensitive(packet, adapter_factory=adapter_factory)
@@ -107,7 +96,7 @@ async def _run_inference(packet: _CrawlModelPacket, *, adapter_factory: Any = co
     return result
 
 
-async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory: Any = codex_adapter.CodexSubscriptionAdapter) -> tuple[contracts.ProviderResult, RequestUsage]:
+async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory: Any = codex_adapter.CodexSubscriptionAdapter) -> contracts.ProviderResult:
     invalid_admission = False
     try:
         admitted = validate_workflow_payload(packet.admitted_request)
@@ -122,7 +111,7 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
     dispatch = _dispatch(packet, admitted, request_body)
     effect = reserve(dispatch.model_dump(mode="json"), dispatch.digest())
 
-    def recorded() -> tuple[contracts.ProviderResult, RequestUsage]:
+    def recorded() -> contracts.ProviderResult:
         if effect.result is None or effect.audit is None:
             raise BriefGenerationError("recorded model effect lacks result or usage audit")
         invalid_record = False
@@ -136,7 +125,7 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
             invalid_record = True
         if invalid_record:
             raise BriefGenerationError("recorded model effect failed validation") from None
-        return contracts.ProviderResult(brief=brief, audit=audit), _usage(audit)
+        return contracts.ProviderResult(brief=brief, audit=audit)
 
     if effect.state == "reconciled":
         return recorded()
@@ -176,51 +165,26 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
     audit = audit.model_copy(update={"record_digest": contracts.provider_record_digest(brief, audit)})
     audit_json = audit.model_dump(mode="json")
     _persist(dispatch, "reconciled", audit_json, result=result)
-    return contracts.ProviderResult(brief=brief, audit=audit), _usage(audit)
+    return contracts.ProviderResult(brief=brief, audit=audit)
 
 
-async def _crawl_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+@DBOS.step(name="crawl_observe_model_v2", retries_allowed=False)
+async def _crawl_model_step(
+    packet: _CrawlModelPacket,
+) -> contracts.ProviderResult | AmbiguousResult:
     error: tuple[type[BriefGenerationError], str] | None = None
     try:
-        response = await _crawl_model_sensitive(messages, info)
+        result = await _run_inference(packet)
+    except AmbiguousEffectError:
+        return AmbiguousResult(kind="unknown")
     except BriefGenerationError as exc:
         error = type(exc), str(exc)
     if error is not None:
-        del messages, info
+        del packet
         raise error[0](error[1]) from None
-    return response
+    return result
 
 
-async def _crawl_model_sensitive(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    if info.allow_text_output or {tool.name for tool in info.output_tools} != {
-        "final_result_ProviderResult", "final_result_AmbiguousResult"
-    }:
-        raise BriefGenerationError("Crawl model output contract changed")
-    parts = (part for message in reversed(messages) for part in reversed(message.parts))
-    contents = (part.content for part in parts if isinstance(part, UserPromptPart))
-    raw_packet = next((content for content in contents if isinstance(content, str)), None)
-    if raw_packet is None:
-        raise BriefGenerationError("Crawl model packet is missing")
-    invalid_packet = False
-    try:
-        packet = _CrawlModelPacket.model_validate_json(raw_packet)
-    except ValueError:
-        invalid_packet = True
-    if invalid_packet:
-        raise BriefGenerationError("Crawl model packet is invalid") from None
-    try:
-        result, usage = await _run_inference(packet)
-    except AmbiguousEffectError:
-        return ModelResponse(parts=[ToolCallPart(
-            "final_result_AmbiguousResult", {"kind": "unknown"}
-        )], usage=RequestUsage())
-    return ModelResponse(parts=[ToolCallPart(
-        "final_result_ProviderResult", result.model_dump(mode="json")
-    )], usage=usage)
-
-
-_crawl_durability = DBOSDurability(name="crawl_observe_agent", model_step_config={"retries_allowed": False}, parallel_execution_mode="sequential", register_legacy_workflows=False)
-_crawl_agent = Agent(FunctionModel(_crawl_model, model_name="codex-subscription-adapter"), name="crawl_observe_agent", output_type=contracts.ProviderResult | AmbiguousResult, retries=0, capabilities=[_crawl_durability])
 crawl_observe_queue = Queue("crawl-observe-v1", concurrency=1, worker_concurrency=1)
 
 
@@ -254,7 +218,7 @@ async def _evidence_brief_workflow_sensitive(
         invalid_admission = True
     if invalid_admission:
         raise BriefGenerationError("workflow admission is invalid") from None
-    result = (await _crawl_agent.run(packet.model_dump_json(), retries=0)).output
+    result = await _crawl_model_step(packet)
     if isinstance(result, AmbiguousResult):
         raise AmbiguousEffectError("model effect outcome requires manual reconciliation")
     return contracts.EvidenceBriefResponse(**result.brief.model_dump(mode="json"),
