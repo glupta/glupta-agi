@@ -35,6 +35,10 @@ _datasource: SQLAlchemyDatasource | None = None
 _SCHEMA_VERSION = "glupta-crawl-external-effects-v4"
 _TABLE = "crawl_external_effects_v4"
 _STATES = ("reserved", "dispatching", "returned", "reconciled", "failed", "unknown")
+_PHASES = ("adapter_construction_started", "account_lookup_started", "model_catalog_started",
+    "thread_start_started", "turn_invocation_started", "turn_returned")
+PRE_TURN_PHASES = frozenset(_PHASES[:4])
+_PHASE_PREFIX = "dispatch_phase:"
 _COLUMNS = {
     "workflow_id": ("TEXT", False),
     "slot_id": ("TEXT", False),
@@ -115,6 +119,18 @@ def _json(value: Any) -> dict[str, Any] | None:
         except (TypeError, ValueError):
             return None
     return value if isinstance(value, dict) else None
+
+
+def phase_marker(phase: str) -> str:
+    if phase not in _PHASES:
+        raise RuntimeError("external effect dispatch phase is not allowed")
+    return f"{_PHASE_PREFIX}{phase}"
+
+
+def dispatch_phase(effect: Effect) -> str | None:
+    marker = effect.hold_reason or ""
+    phase = marker.removeprefix(_PHASE_PREFIX)
+    return phase if marker.startswith(_PHASE_PREFIX) and phase in _PHASES else None
 
 
 def _effect(row: dict[str, Any]) -> Effect:
@@ -236,7 +252,7 @@ def transition(
                     "UPDATE crawl_external_effects_v4 SET state=:state,"
                     "result_json=COALESCE(result_json,CAST(:result AS JSONB)),"
                     "audit_json=COALESCE(audit_json,CAST(:audit AS JSONB)),"
-                    "hold_reason=COALESCE(:reason,hold_reason),updated_at=NOW() "
+                    "hold_reason=CASE WHEN :state='reconciled' THEN :reason ELSE COALESCE(:reason,hold_reason) END,updated_at=NOW() "  # noqa: E501
                     "WHERE workflow_id=:workflow_id AND (state=:expected OR :recover AND state IN "
                     "('dispatching','returned','reconciled','failed','unknown')) RETURNING *"
                 ),

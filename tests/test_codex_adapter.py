@@ -124,7 +124,7 @@ def _result(**changes: object) -> object:
 
 
 def test_exact_subscription_account_and_native_safety_controls() -> None:
-    client, constructed = FakeClient(_result()), []
+    client, constructed, phases = FakeClient(_result()), [], []
 
     def factory(config: object) -> FakeClient:
         constructed.append(config)
@@ -132,7 +132,8 @@ def test_exact_subscription_account_and_native_safety_controls() -> None:
 
     result = asyncio.run(
         CodexSubscriptionAdapter(
-            release_profile(), Path("/private/codex"), auth_generation=1, client_factory=factory
+            release_profile(), Path("/private/codex"), auth_generation=1,
+            phase_recorder=phases.append, client_factory=factory
         ).generate(_dispatch(), _body())
     )
     assert result.audit.subscription_plan == "pro"
@@ -144,6 +145,8 @@ def test_exact_subscription_account_and_native_safety_controls() -> None:
     prompt, kwargs = client.thread.run_kwargs
     assert prompt == "grounded prompt" and kwargs["effort"] == ReasoningEffort.medium
     assert kwargs["output_schema"] == contracts.EvidenceBrief.model_json_schema()
+    assert phases == ["account_lookup_started", "model_catalog_started",
+        "thread_start_started", "turn_invocation_started", "turn_returned"]
 
 
 @pytest.mark.parametrize("ambient", ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"])
@@ -161,7 +164,8 @@ def test_metered_or_ambient_provider_routes_reject_before_client(ambient: str) -
     ):
         asyncio.run(
             CodexSubscriptionAdapter(
-                release_profile(), Path("/private/codex"), auth_generation=1, client_factory=factory
+                release_profile(), Path("/private/codex"), auth_generation=1,
+                phase_recorder=lambda _phase: None, client_factory=factory
             ).generate(_dispatch(), _body())
         )
     assert built is False
@@ -180,9 +184,78 @@ def test_wrong_plan_invalid_usage_and_cleanup_fail_closed() -> None:
                     release_profile(),
                     Path("/private/codex"),
                     auth_generation=1,
+                    phase_recorder=lambda _phase: None,
                     client_factory=lambda _config, value=client: value,
                 ).generate(_dispatch(), _body())
             )
+
+
+@pytest.mark.parametrize(
+    ("boundary", "phases"),
+    [
+        ("account", ["account_lookup_started"]),
+        ("models", ["account_lookup_started", "model_catalog_started"]),
+        ("thread_start", ["account_lookup_started", "model_catalog_started",
+            "thread_start_started"]),
+    ],
+)
+def test_each_pre_turn_boundary_is_proven_and_terminal(
+    boundary: str, phases: list[str]
+) -> None:
+    client, observed = FakeClient(_result()), []
+
+    async def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("RAW_PRE_TURN")
+
+    setattr(client, boundary, fail)
+    adapter = CodexSubscriptionAdapter(release_profile(), Path("/private/codex"),
+        auth_generation=1, phase_recorder=observed.append, client_factory=lambda _: client)
+    with pytest.raises(AdapterError) as caught:
+        asyncio.run(adapter.generate(_dispatch(), _body()))
+    assert observed == phases
+    assert "RAW_PRE_TURN" not in str(caught.value)
+    assert client.thread.run_kwargs is None
+
+
+@pytest.mark.parametrize("failed_phase", ["account_lookup_started", "model_catalog_started",
+    "thread_start_started", "turn_invocation_started"])
+def test_pre_turn_phase_persistence_failure_never_invokes_turn(failed_phase: str) -> None:
+    client, phases = FakeClient(_result()), []
+
+    def record(phase: str) -> None:
+        phases.append(phase)
+        if phase == failed_phase:
+            raise RuntimeError("RAW_LOST_PHASE_ACK")
+
+    adapter = CodexSubscriptionAdapter(release_profile(), Path("/private/codex"),
+        auth_generation=1, phase_recorder=record, client_factory=lambda _: client)
+    with pytest.raises(AdapterError) as caught:
+        asyncio.run(adapter.generate(_dispatch(), _body()))
+    assert phases[-1] == failed_phase
+    assert client.thread.run_kwargs is None
+    assert "RAW_LOST_PHASE_ACK" not in str(caught.value)
+
+
+def test_turn_invocation_or_returned_phase_failure_is_ambiguous() -> None:
+    for failure in ("turn", "returned_phase"):
+        client, phases = FakeClient(_result()), []
+        if failure == "turn":
+            async def fail(*_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("RAW_TURN")
+            client.thread.run = fail  # type: ignore[method-assign]
+
+        def record(phase: str, *, seen: list[str] = phases, fail_at: str = failure) -> None:
+            seen.append(phase)
+            if fail_at == "returned_phase" and phase == "turn_returned":
+                raise RuntimeError("RAW_PHASE_ACK")
+
+        adapter = CodexSubscriptionAdapter(release_profile(), Path("/private/codex"),
+            auth_generation=1, phase_recorder=record,
+            client_factory=lambda _, value=client: value)
+        with pytest.raises(ProviderAmbiguousError) as caught:
+            asyncio.run(adapter.generate(_dispatch(), _body()))
+        assert "turn_invocation_started" in phases
+        assert "RAW_" not in str(caught.value)
 
 
 def test_request_identity_and_observed_usage_are_bound() -> None:
@@ -191,6 +264,7 @@ def test_request_identity_and_observed_usage_are_bound() -> None:
         release_profile(),
         Path("/private/codex"),
         auth_generation=1,
+        phase_recorder=lambda _phase: None,
         client_factory=lambda _: client,
     )
     with pytest.raises(AdapterError):
@@ -209,6 +283,7 @@ def test_request_identity_and_observed_usage_are_bound() -> None:
         release_profile(),
         Path("/private/codex"),
         auth_generation=1,
+        phase_recorder=lambda _phase: None,
         client_factory=lambda _: FakeClient(_result(usage=excessive)),
     )
     with pytest.raises(ProviderRejectedError, match="observed ceiling"):

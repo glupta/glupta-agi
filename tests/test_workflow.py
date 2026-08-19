@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import traceback
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,10 +33,10 @@ from tests.helpers import provider_audit, release_profile
 WORKFLOW_ID = "0198be50-0000-7000-8000-000000000000"
 
 
-def _packet(**changes: object) -> _CrawlModelPacket:
+def _packet(source_content: str = "grounded fact", **changes: object) -> _CrawlModelPacket:
     admitted = admit_inline_request(
         question="question",
-        sources=[{"path": "source.md", "content": "grounded fact"}],
+        sources=[{"path": "source.md", "content": source_content}],
         disclosure_profile="external_disclosed_v1",
         disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
         external_disclosure_ack=True,
@@ -91,7 +92,8 @@ class FakeAdapter:
     dispatch: FrozenDispatch | None = None
     body: dict[str, object] | None = None
 
-    def __init__(self, _profile: object, _home: Path, *, auth_generation: int) -> None:
+    def __init__(self, _profile: object, _home: Path, *, auth_generation: int,
+        phase_recorder: object) -> None:
         assert auth_generation == 1
 
     async def generate(
@@ -126,10 +128,19 @@ class AmbiguousAdapter(FakeAdapter):
         raise ProviderAmbiguousError("synthetic ambiguous turn")
 
 
+class PreTurnAdapter(FakeAdapter):
+    async def generate(self, *_args: object, **_kwargs: object) -> ProviderResult:
+        type(self).calls += 1
+        from glupta_agi.codex_adapter import AdapterError
+
+        raise AdapterError("RAW_PRE_TURN")
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeAdapter.calls = 0
         AmbiguousAdapter.calls = 0
+        PreTurnAdapter.calls = 0
 
     def test_queue_step_and_retry_contract_are_fixed(self) -> None:
         self.assertEqual(
@@ -204,10 +215,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.brief.answer, "Grounded.")
 
     def test_post_dispatch_ambiguity_is_sticky_and_never_redispatches(self) -> None:
-        for state in ("dispatching", "returned", "unknown"):
+        for state, reason in (("dispatching", None),
+            ("dispatching", "dispatch_phase:turn_invocation_started"),
+            ("dispatching", "dispatch_phase:turn_returned"), ("returned", None),
+            ("unknown", None)):
             with (
-                self.subTest(state=state),
-                patch("glupta_agi.workflow.reserve", side_effect=_reserve(state)),
+                self.subTest(state=state, reason=reason),
+                patch("glupta_agi.workflow.reserve", side_effect=_reserve(
+                    state, hold_reason=reason)),
                 patch(
                     "glupta_agi.workflow.hold_unknown",
                     side_effect=AmbiguousEffectError("manual reconciliation"),
@@ -216,6 +231,151 @@ class WorkflowTests(unittest.TestCase):
                 with self.assertRaises(AmbiguousEffectError):
                     asyncio.run(_run_inference(_packet(), adapter_factory=FakeAdapter))
         self.assertEqual(FakeAdapter.calls, 0)
+
+    def test_proven_pre_turn_failure_is_terminal(self) -> None:
+        with (
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
+            patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+            self.assertRaisesRegex(BriefGenerationError, "before turn invocation"),
+        ):
+            asyncio.run(_run_inference(_packet(), adapter_factory=PreTurnAdapter))
+        self.assertEqual(PreTurnAdapter.calls, 1)
+        self.assertEqual(transition.call_args_list[-1].args[2], "failed")
+        self.assertEqual(transition.call_args_list[-1].kwargs["hold_reason"], "pre_turn_failure")
+
+    def test_each_recorded_pre_turn_phase_recovers_without_redispatch(self) -> None:
+        for phase in ("adapter_construction_started", "account_lookup_started",
+            "model_catalog_started", "thread_start_started"):
+            with (
+                self.subTest(phase=phase),
+                patch("glupta_agi.workflow.reserve", side_effect=_reserve(
+                    "dispatching", hold_reason=f"dispatch_phase:{phase}")),
+                patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+                self.assertRaisesRegex(BriefGenerationError, "before turn invocation"),
+            ):
+                asyncio.run(_run_inference(_packet(), adapter_factory=FakeAdapter))
+            self.assertEqual(transition.call_args_list[-1].args[2], "failed")
+            self.assertEqual(
+                transition.call_args_list[-1].kwargs["hold_reason"], "pre_turn_recovery"
+            )
+        self.assertEqual(FakeAdapter.calls, 0)
+
+    def test_adapter_construction_failure_is_sanitized_terminal(self) -> None:
+        def broken_factory(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("RAW_CONSTRUCTION")
+
+        with (
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
+            patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+            self.assertRaisesRegex(BriefGenerationError, "before turn invocation") as caught,
+        ):
+            asyncio.run(_run_inference(_packet(), adapter_factory=broken_factory))
+        self.assertNotIn("RAW_CONSTRUCTION", str(caught.exception))
+        self.assertEqual(transition.call_args_list[-1].args[2], "failed")
+
+    def test_denied_ambient_provider_authority_is_terminal_before_client(self) -> None:
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "RAW_DENIED_AUTHORITY"}, clear=True),
+            patch("glupta_agi.workflow.reserve", side_effect=_reserve()),
+            patch("glupta_agi.workflow.transition", side_effect=_transition) as transition,
+            self.assertRaisesRegex(BriefGenerationError, "before turn invocation") as caught,
+        ):
+            asyncio.run(_run_inference(_packet()))
+        self.assertNotIn("RAW_DENIED_AUTHORITY", str(caught.exception))
+        self.assertEqual(transition.call_args_list[-1].args[2], "failed")
+
+    def test_pre_turn_recovery_lost_ack_reads_definitive_failure_once(self) -> None:
+        packet, reservations, writes = _packet(), 0, 0
+
+        def reserve(dispatch: dict[str, object], _digest: str) -> Effect:
+            nonlocal reservations
+            reservations += 1
+            return _effect("dispatching" if reservations == 1 else "failed", dispatch,
+                hold_reason="dispatch_phase:thread_start_started" if reservations == 1
+                else "pre_turn_recovery")
+
+        def transition(*_args: object, **_kwargs: object) -> Effect:
+            nonlocal writes
+            writes += 1
+            raise RuntimeError("RAW_LOST_ACK")
+
+        with (
+            patch("glupta_agi.workflow.reserve", side_effect=reserve),
+            patch("glupta_agi.workflow.transition", side_effect=transition),
+            patch("glupta_agi.workflow.hold_unknown") as hold,
+            self.assertRaisesRegex(BriefGenerationError, "before turn invocation"),
+        ):
+            asyncio.run(_run_inference(packet, adapter_factory=FakeAdapter))
+        self.assertEqual((FakeAdapter.calls, writes), (0, 1))
+        hold.assert_not_called()
+
+    def test_initial_phase_write_faults_are_sanitized_and_never_dispatch(self) -> None:
+        for readback in ("reserved", "dispatching", "mismatched", "unavailable"):
+            packet = _packet(source_content="ADMITTED_SOURCE_SECRET")
+            reservations = writes = 0
+            terminal = "failed" if readback in {"reserved", "dispatching"} else "unknown"
+
+            def reserve(dispatch: dict[str, object], _digest: str, *, mode: str = readback,
+                final: str = terminal) -> Effect:
+                nonlocal reservations
+                reservations += 1
+                if reservations == 1:
+                    return _effect("reserved", dispatch)
+                if reservations == 2 and mode == "unavailable":
+                    raise RuntimeError("RAW_READBACK_SECRET")
+                if reservations == 2 and mode != "reserved":
+                    phase = "adapter_construction_started" if mode == "dispatching" else (
+                        "turn_invocation_started"
+                    )
+                    return _effect("dispatching", dispatch, hold_reason=f"dispatch_phase:{phase}")
+                return _effect(final if reservations > 2 else "reserved", dispatch,
+                    hold_reason="pre_turn_failure" if final == "failed" else
+                    "initial_phase_persistence_ambiguous")
+
+            def transition(workflow_id: str, expected: str, state: str,
+                **kwargs: object) -> Effect:
+                nonlocal writes
+                writes += 1
+                if writes == 1:
+                    raise RuntimeError("RAW_INITIAL_PHASE_SECRET")
+                return _transition(workflow_id, expected, state, **kwargs)
+
+            hold = patch("glupta_agi.workflow.hold_unknown",
+                side_effect=AmbiguousEffectError("manual reconciliation"))
+            with self.subTest(readback=readback), patch(
+                "glupta_agi.workflow.reserve", side_effect=reserve
+            ), patch("glupta_agi.workflow.transition", side_effect=transition), hold as held:
+                expected = BriefGenerationError if terminal == "failed" else AmbiguousEffectError
+                try:
+                    asyncio.run(_run_inference(packet,
+                        adapter_factory=lambda *_a, **_k: self.fail("adapter constructed")))
+                except expected as caught:
+                    captured_error = caught
+                else:
+                    self.fail(f"{expected.__name__} not raised")
+                self.assertIsNone(captured_error.__cause__)
+                self.assertIsNone(captured_error.__context__)
+                product_frames: list[str] = []
+                cursor = captured_error.__traceback__
+                while cursor is not None:
+                    if "/src/glupta_agi/" in cursor.tb_frame.f_code.co_filename:
+                        product_frames.append(cursor.tb_frame.f_code.co_name)
+                        captured = traceback.TracebackException(
+                            type(captured_error), captured_error, cursor, capture_locals=True)
+                        for marker in ("RAW_", "ADMITTED_SOURCE_SECRET"):
+                            self.assertNotIn(marker, repr(cursor.tb_frame.f_locals))
+                            self.assertNotIn(marker, repr(captured.stack[0].locals))
+                            self.assertNotIn(marker, "".join(captured.format()))
+                    cursor = cursor.tb_next
+                self.assertEqual(product_frames, ["_run_inference"])
+                if terminal == "failed":
+                    held.assert_not_called()
+                    self.assertEqual(writes, 2)
+                else:
+                    held.assert_called_once()
+                with self.assertRaises(expected):
+                    asyncio.run(_run_inference(packet,
+                        adapter_factory=lambda *_a, **_k: self.fail("replay dispatched")))
 
     def test_model_step_checkpoints_structured_ambiguity_without_retry(self) -> None:
         with patch(

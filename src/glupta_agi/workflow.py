@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: noqa: E501,I001
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from . import codex_adapter, contracts
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
-from .effects import AmbiguousEffectError, EffectConflictError, hold_unknown, reserve, transition
+from .effects import (PRE_TURN_PHASES, AmbiguousEffectError, EffectConflictError, dispatch_phase, hold_unknown, phase_marker, reserve, transition)
 from .inference import FrozenDispatch, ReleaseProfile
 from .intake import IntakeError, validate_workflow_payload
 
@@ -36,10 +36,7 @@ class _CrawlModelPacket(BaseModel):
 
 
 def _request_body(prompt: str, profile: ReleaseProfile) -> dict[str, Any]:
-    return {"model": profile.model, "instructions": SYSTEM_PROMPT, "input": prompt,
-        "reasoning_effort": profile.reasoning_effort,
-        "output_schema_digest": contracts.canonical_digest(contracts.EvidenceBrief.model_json_schema()),
-        "sandbox": "read-only", "approval_mode": "deny-all", "tools": [], "web_search": "disabled"}
+    return {"model": profile.model, "instructions": SYSTEM_PROMPT, "input": prompt, "reasoning_effort": profile.reasoning_effort, "output_schema_digest": contracts.canonical_digest(contracts.EvidenceBrief.model_json_schema()), "sandbox": "read-only", "approval_mode": "deny-all", "tools": [], "web_search": "disabled"}
 
 
 def _dispatch(packet: _CrawlModelPacket, admitted: Any, request_body: dict[str, Any]) -> FrozenDispatch:
@@ -55,23 +52,15 @@ def _dispatch(packet: _CrawlModelPacket, admitted: Any, request_body: dict[str, 
         raise BriefGenerationError("model request exceeds the input-byte ceiling")
     queue_deadline = packet.admitted_at.astimezone(UTC) + timedelta(seconds=profile.queue_timeout_seconds)
     return FrozenDispatch(workflow_id=packet.workflow_id, request_digest=admitted.request_digest,
-        request_body_digest=contracts.canonical_digest(request_body), model=profile.model,
-        reasoning_effort=profile.reasoning_effort, release_profile_digest=profile.digest(),
-        disclosure_profile=admitted.disclosure_profile,
-        disclosure_notice_digest=admitted.disclosure_notice_digest, external_disclosure_ack=admitted.external_disclosure_ack,
-        subscription_route_id=profile.subscription_route_id, subscription_plan=profile.subscription_plan,
-        auth_generation=packet.auth_generation, input_bytes=input_bytes,
-        max_observed_input_tokens=profile.max_observed_input_tokens,
-        max_observed_output_tokens=profile.max_observed_output_tokens,
-        max_observed_reasoning_tokens=profile.max_observed_reasoning_tokens,
-        queue_deadline=queue_deadline, wall_deadline=packet.admitted_at.astimezone(UTC)
-        + timedelta(seconds=profile.wall_timeout_seconds))
+        request_body_digest=contracts.canonical_digest(request_body), model=profile.model, reasoning_effort=profile.reasoning_effort, release_profile_digest=profile.digest(), disclosure_profile=admitted.disclosure_profile,
+        disclosure_notice_digest=admitted.disclosure_notice_digest, external_disclosure_ack=admitted.external_disclosure_ack, subscription_route_id=profile.subscription_route_id, subscription_plan=profile.subscription_plan,
+        auth_generation=packet.auth_generation, input_bytes=input_bytes, max_observed_input_tokens=profile.max_observed_input_tokens, max_observed_output_tokens=profile.max_observed_output_tokens, max_observed_reasoning_tokens=profile.max_observed_reasoning_tokens,
+        queue_deadline=queue_deadline, wall_deadline=packet.admitted_at.astimezone(UTC) + timedelta(seconds=profile.wall_timeout_seconds))
 
 
-def _persist(frozen: FrozenDispatch, state: str, audit: dict[str, Any] | None, *,
-    result: dict[str, Any] | None = None, reason: str | None = None) -> None:
+def _persist(frozen: FrozenDispatch, state: str, audit: dict[str, Any] | None, *, result: dict[str, Any] | None = None, reason: str | None = None, expected: str = "dispatching") -> None:
     try:
-        transition(frozen.workflow_id, "dispatching", state, result=result, audit=audit, hold_reason=reason)
+        transition(frozen.workflow_id, expected, state, result=result, audit=audit, hold_reason=reason)
     except Exception:
         ambiguity = f"{reason or 'result'}_persistence_ambiguous"
         try:
@@ -82,6 +71,26 @@ def _persist(frozen: FrozenDispatch, state: str, audit: dict[str, Any] | None, *
         observed = recorded.state, recorded.result, recorded.audit, recorded.hold_reason
         if observed != target:
             hold_unknown(frozen.workflow_id, ambiguity, audit=audit)
+
+
+def _begin_dispatch(frozen: FrozenDispatch) -> None:
+    try:
+        transition(frozen.workflow_id, "reserved", "dispatching",
+            hold_reason=phase_marker("adapter_construction_started"))
+    except Exception:  # noqa: S110 -- exact readback reconciles an ambiguous commit acknowledgement
+        pass
+    else:
+        return
+    try:
+        effect = reserve(frozen.model_dump(mode="json"), frozen.digest())
+    except Exception:
+        hold_unknown(frozen.workflow_id, "initial_phase_persistence_ambiguous")
+    safe = effect.state == "reserved" or (effect.state == "dispatching"
+        and dispatch_phase(effect) == "adapter_construction_started")
+    if not safe:
+        hold_unknown(frozen.workflow_id, "initial_phase_persistence_ambiguous")
+    _persist(frozen, "failed", None, reason="pre_turn_failure", expected=effect.state)
+    raise BriefGenerationError("provider failed before turn invocation")
 
 
 async def _run_inference(packet: _CrawlModelPacket, *, adapter_factory: Any = codex_adapter.CodexSubscriptionAdapter) -> contracts.ProviderResult:
@@ -106,8 +115,7 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
         raise BriefGenerationError("admitted request failed validation") from None
     if packet.auth_generation != packet.release_profile.auth_generation:
         raise BriefGenerationError("subscription auth generation changed after admission")
-    request_body = _request_body(build_user_prompt(admitted.question,
-        [source.__dict__ for source in admitted.sources]), packet.release_profile)
+    request_body = _request_body(build_user_prompt(admitted.question, [source.__dict__ for source in admitted.sources]), packet.release_profile)
     dispatch = _dispatch(packet, admitted, request_body)
     effect = reserve(dispatch.model_dump(mode="json"), dispatch.digest())
 
@@ -131,14 +139,24 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
         return recorded()
     if effect.state == "failed":
         raise BriefGenerationError("recorded model effect failed")
+    if effect.state == "dispatching" and dispatch_phase(effect) in PRE_TURN_PHASES:
+        _persist(dispatch, "failed", None, reason="pre_turn_recovery")
+        raise BriefGenerationError("recorded model effect failed before turn invocation")
     if effect.state in {"dispatching", "returned", "unknown"}:
         hold_unknown(packet.workflow_id, f"recovery_from_{effect.state}", audit=effect.audit)
     if datetime.now(UTC) > dispatch.queue_deadline:
         transition(packet.workflow_id, "reserved", "failed", hold_reason="queue_deadline_expired")
         raise BriefGenerationError("model request exceeded the queue deadline")
 
-    adapter = adapter_factory(packet.release_profile, Path(packet.codex_home), auth_generation=packet.auth_generation)
-    effect = transition(packet.workflow_id, "reserved", "dispatching")
+    _begin_dispatch(dispatch)
+    def record_phase(phase: str) -> None:
+        transition(packet.workflow_id, "dispatching", "dispatching", hold_reason=phase_marker(phase))
+    try:
+        adapter = adapter_factory(packet.release_profile, Path(packet.codex_home),
+            auth_generation=packet.auth_generation, phase_recorder=record_phase)
+    except Exception:
+        _persist(dispatch, "failed", None, reason="pre_turn_failure")
+        raise BriefGenerationError("provider failed before turn invocation") from None
     try:
         provider_result = await adapter.generate(dispatch, request_body)
     except codex_adapter.ProviderRejectedError as exc:
@@ -149,7 +167,8 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
         audit = None if exc.audit is None else exc.audit.model_dump(mode="json")
         hold_unknown(packet.workflow_id, "provider_outcome_ambiguous", audit=audit)
     except codex_adapter.AdapterError:
-        hold_unknown(packet.workflow_id, "provider_outcome_ambiguous")
+        _persist(dispatch, "failed", None, reason="pre_turn_failure")
+        raise BriefGenerationError("provider failed before turn invocation") from None
     invalid_citation = False
     try:
         brief = resolve_citations(provider_result.brief, packet.admitted_request["sources"])
@@ -169,9 +188,7 @@ async def _run_inference_sensitive(packet: _CrawlModelPacket, *, adapter_factory
 
 
 @DBOS.step(name="crawl_observe_model_v2", retries_allowed=False)
-async def _crawl_model_step(
-    packet: _CrawlModelPacket,
-) -> contracts.ProviderResult | AmbiguousResult:
+async def _crawl_model_step(packet: _CrawlModelPacket) -> contracts.ProviderResult | AmbiguousResult:
     error: tuple[type[BriefGenerationError], str] | None = None
     try:
         result = await _run_inference(packet)
@@ -189,8 +206,7 @@ crawl_observe_queue = Queue("crawl-observe-v1", concurrency=1, worker_concurrenc
 
 
 @DBOS.workflow()
-async def evidence_brief_workflow(
-    payload: dict[str, Any], workflow_id: str, release_profile: dict[str, Any],
+async def evidence_brief_workflow(payload: dict[str, Any], workflow_id: str, release_profile: dict[str, Any],
     codex_home: str, auth_generation: int, admitted_at: str) -> dict[str, Any]:
     error: tuple[type[BriefGenerationError | AmbiguousEffectError], str] | None = None
     try:
@@ -204,15 +220,13 @@ async def evidence_brief_workflow(
     return result
 
 
-async def _evidence_brief_workflow_sensitive(
-    payload: dict[str, Any], workflow_id: str, release_profile: dict[str, Any],
+async def _evidence_brief_workflow_sensitive(payload: dict[str, Any], workflow_id: str, release_profile: dict[str, Any],
     codex_home: str, auth_generation: int, admitted_at: str) -> dict[str, Any]:
     invalid_admission = False
     try:
         admitted = validate_workflow_payload(payload)
         profile = ReleaseProfile.model_validate(release_profile)
-        packet = _CrawlModelPacket(admitted_request=admitted.workflow_payload(), release_profile=profile,
-            codex_home=codex_home, auth_generation=auth_generation, admitted_at=admitted_at,
+        packet = _CrawlModelPacket(admitted_request=admitted.workflow_payload(), release_profile=profile, codex_home=codex_home, auth_generation=auth_generation, admitted_at=admitted_at,
             workflow_id=workflow_id)
     except (IntakeError, ValueError):
         invalid_admission = True
@@ -221,6 +235,5 @@ async def _evidence_brief_workflow_sensitive(
     result = await _crawl_model_step(packet)
     if isinstance(result, AmbiguousResult):
         raise AmbiguousEffectError("model effect outcome requires manual reconciliation")
-    return contracts.EvidenceBriefResponse(**result.brief.model_dump(mode="json"),
-        request_digest=admitted.request_digest, workflow_id=workflow_id,
+    return contracts.EvidenceBriefResponse(**result.brief.model_dump(mode="json"), request_digest=admitted.request_digest, workflow_id=workflow_id,
         markdown=render_markdown(result.brief), provider_audit=result.audit).model_dump(mode="json")

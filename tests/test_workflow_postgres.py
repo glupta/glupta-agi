@@ -48,7 +48,7 @@ def _packet() -> workflow._CrawlModelPacket:
     )
 
 
-def _prime_dispatch(packet: workflow._CrawlModelPacket):
+def _prime_dispatch(packet: workflow._CrawlModelPacket, *, phase: str | None = None):
     admitted = validate_workflow_payload(packet.admitted_request)
     body = workflow._request_body(
         workflow.build_user_prompt(admitted.question, packet.admitted_request["sources"]),
@@ -56,7 +56,8 @@ def _prime_dispatch(packet: workflow._CrawlModelPacket):
     )
     dispatch = workflow._dispatch(packet, admitted, body)
     effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
-    effects.transition(packet.workflow_id, "reserved", "dispatching")
+    effects.transition(packet.workflow_id, "reserved", "dispatching",
+        hold_reason=None if phase is None else effects.phase_marker(phase))
     brief = EvidenceBrief(answer="Grounded.", citations=[], uncertainties=[], next_decisions=[])
     audit = provider_audit(
         brief,
@@ -96,6 +97,83 @@ def test_lost_failed_ack_exact_readback_remains_definitive() -> None:
         "provider_rejected",
     )
     _assert_replay_does_not_dispatch(packet, workflow.BriefGenerationError)
+
+
+def test_lost_reconciled_ack_clears_phase_and_replays_exact_result() -> None:
+    packet = _packet()
+    dispatch, audit = _prime_dispatch(packet, phase="turn_returned")
+    brief = EvidenceBrief(answer="Grounded.", citations=[], uncertainties=[], next_decisions=[])
+    result = brief.model_dump(mode="json")
+
+    def commit_then_lose_ack(*args: object, **kwargs: object):
+        effects.transition(*args, **kwargs)
+        raise RuntimeError("lost commit acknowledgement")
+
+    with patch.object(workflow, "transition", side_effect=commit_then_lose_ack):
+        workflow._persist(dispatch, "reconciled", audit, result=result)
+
+    recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+    assert (recorded.state, recorded.result, recorded.hold_reason) == ("reconciled", result, None)
+
+
+def test_pre_turn_recovery_lost_ack_stays_failed_without_redispatch() -> None:
+    packet = _packet()
+    dispatch, _audit = _prime_dispatch(packet, phase="thread_start_started")
+
+    def commit_then_lose_ack(*args: object, **kwargs: object):
+        effects.transition(*args, **kwargs)
+        raise RuntimeError("lost commit acknowledgement")
+
+    with (
+        patch.object(workflow, "transition", side_effect=commit_then_lose_ack),
+        pytest.raises(workflow.BriefGenerationError, match="before turn invocation"),
+    ):
+        asyncio.run(workflow._run_inference(packet,
+            adapter_factory=lambda *_a, **_k: pytest.fail("recovery attempted dispatch")))
+
+    recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+    assert (recorded.state, recorded.hold_reason) == ("failed", "pre_turn_recovery")
+    _assert_replay_does_not_dispatch(packet, workflow.BriefGenerationError)
+
+
+@pytest.mark.parametrize("fault", ["precommit", "lost_ack", "lost_ack_unavailable"])
+def test_initial_phase_write_fault_is_terminal_or_sticky_without_dispatch(fault: str) -> None:
+    packet, reservations, writes = _packet(), 0, 0
+
+    def reserve(*args: object, **kwargs: object):
+        nonlocal reservations
+        reservations += 1
+        if fault == "lost_ack_unavailable" and reservations == 2:
+            raise RuntimeError("readback unavailable")
+        return effects.reserve(*args, **kwargs)
+
+    def transition(*args: object, **kwargs: object):
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            if fault != "precommit":
+                effects.transition(*args, **kwargs)
+            raise RuntimeError("initial phase acknowledgement lost")
+        return effects.transition(*args, **kwargs)
+
+    expected = (
+        AmbiguousEffectError if fault == "lost_ack_unavailable" else workflow.BriefGenerationError
+    )
+    with (
+        patch.object(workflow, "reserve", side_effect=reserve),
+        patch.object(workflow, "transition", side_effect=transition),
+        pytest.raises(expected),
+    ):
+        asyncio.run(workflow._run_inference(packet,
+            adapter_factory=lambda *_a, **_k: pytest.fail("phase failure attempted dispatch")))
+
+    admitted = validate_workflow_payload(packet.admitted_request)
+    body = workflow._request_body(workflow.build_user_prompt(
+        admitted.question, packet.admitted_request["sources"]), packet.release_profile)
+    dispatch = workflow._dispatch(packet, admitted, body)
+    recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+    assert recorded.state == ("unknown" if fault == "lost_ack_unavailable" else "failed")
+    _assert_replay_does_not_dispatch(packet, expected)
 
 
 @pytest.mark.parametrize("readback", ["mismatched", "unavailable"])
