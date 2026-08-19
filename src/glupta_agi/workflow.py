@@ -17,7 +17,7 @@ from pydantic_ai.usage import RequestUsage
 
 from . import contracts, openai_adapter
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
-from .effects import AmbiguousEffectError, hold_unknown, reserve, transition
+from .effects import AmbiguousEffectError, EffectConflictError, hold_unknown, reserve, transition
 from .inference import FrozenDispatch, ReleaseProfile, usd_upper_bound
 from .intake import IntakeError, validate_workflow_payload
 
@@ -100,8 +100,8 @@ async def _run_inference(packet: _CrawlModelPacket, *, adapter_factory: Any = op
     error: tuple[type[BriefGenerationError | AmbiguousEffectError], str] | None = None
     try:
         result = await _run_inference_sensitive(packet, adapter_factory=adapter_factory)
-    except (BriefGenerationError, AmbiguousEffectError) as exc:
-        error = type(exc), str(exc)
+    except (BriefGenerationError, AmbiguousEffectError, EffectConflictError) as exc:
+        error = (BriefGenerationError, "recorded model effect conflicts with request") if isinstance(exc, EffectConflictError) else (type(exc), str(exc))  # noqa: E501
     if error is not None:
         del packet, adapter_factory
         raise error[0](error[1]) from None

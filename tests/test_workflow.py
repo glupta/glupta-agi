@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import tempfile
 import traceback
 import unittest
@@ -16,6 +17,7 @@ from pydantic_ai import Agent
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
+from glupta_agi import effects
 from glupta_agi.contracts import (
     DISCLOSURE_NOTICE_DIGEST,
     Citation,
@@ -433,6 +435,51 @@ class WorkflowTests(unittest.TestCase):
                 self.assertRaises(AmbiguousEffectError),
             ):
                 _run(_packet(), adapter_factory=factory)
+        factory.assert_not_called()
+
+    def test_actual_reservation_identity_conflict_is_sanitized_without_dispatch(self) -> None:
+        class Rows:
+            def __init__(self, row: dict[str, object]) -> None:
+                self.row = row
+
+            def mappings(self) -> Rows:
+                return self
+
+            def one_or_none(self) -> dict[str, object]:
+                return self.row
+
+        class Session:
+            calls = 0
+            row: dict[str, object]
+
+            def execute(self, _statement: object, parameters: dict[str, object]) -> object:
+                if "dispatch_json" not in parameters:
+                    return Rows(self.row)
+                type(self).calls += 1
+                requested = FrozenDispatch.model_validate(
+                    json.loads(str(parameters["dispatch_json"])))
+                existing = requested.model_copy(update={"request_body_digest": "f" * 64})
+                dispatch = existing.model_dump(mode="json")
+                self.row = {"workflow_id": existing.workflow_id, "slot_id": "model-0",
+                    "request_digest": existing.request_digest, "dispatch_digest": existing.digest(),
+                    "max_calls": 1, "max_usd_micros": existing.max_usd_micros,
+                    "state": "reserved", "dispatch_json": dispatch,
+                    "result_json": None, "audit_json": None, "hold_reason": None}
+                return Mock()
+
+        session = Session()
+        datasource = Mock()
+        datasource.sql_session.return_value = session
+        datasource.transaction.side_effect = lambda **_kwargs: lambda function: function
+        factory = Mock()
+        with patch.object(effects, "_datasource", datasource):
+            for _attempt in range(2):
+                with self.assertRaisesRegex(
+                    BriefGenerationError, "recorded model effect conflicts with request"
+                ) as caught:
+                    _run(_packet(source_content="RAW_SOURCE_BYTES"), adapter_factory=factory)
+                _assert_product_frames_sanitized(caught.exception, "RAW_SOURCE_BYTES")
+        self.assertEqual(Session.calls, 2)
         factory.assert_not_called()
 
     def test_persistence_fault_boundaries_never_redispatch(self) -> None:

@@ -17,6 +17,10 @@ class AmbiguousEffectError(RuntimeError):
     pass
 
 
+class EffectConflictError(RuntimeError):
+    """A workflow ID is already bound to a different valid dispatch."""
+
+
 @dataclass(frozen=True)
 class Effect:
     workflow_id: str
@@ -194,7 +198,7 @@ def reserve(dispatch: dict[str, Any], dispatch_digest: str) -> Effect:
             raise RuntimeError("external effect reservation disappeared")
         effect = _effect(dict(row))
         if effect.dispatch_digest != dispatch_digest or effect.dispatch != dispatch:
-            raise RuntimeError("external effect identity conflicts with recorded input")
+            raise EffectConflictError("external effect identity conflicts with recorded input")
         return effect
 
     return datasource.transaction(name="crawl_effect_reserve")(transaction)()
@@ -203,8 +207,7 @@ def reserve(dispatch: dict[str, Any], dispatch_digest: str) -> Effect:
 def transition(
     workflow_id: str, expected: str, state: str, *, result: dict[str, Any] | None = None,
     audit: dict[str, Any] | None = None, hold_reason: str | None = None,
-    recover_post_dispatch: bool = False,
-) -> Effect:
+    recover_post_dispatch: bool = False) -> Effect:
     datasource = _store()
 
     def transaction() -> Effect:

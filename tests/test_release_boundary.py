@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from importlib.metadata import metadata
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -19,6 +20,8 @@ class ReleaseBoundaryTests(TestCase):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
         self.assertEqual(project["project"]["version"], __version__)
+        self.assertEqual(metadata("glupta-agi")["Version"], __version__)
+        self.assertNotIn('"0.3.0"', (SOURCE / "__init__.py").read_text(encoding="utf-8"))
         self.assertEqual(app.version, __version__)
         settings = SimpleNamespace(dbos_system_database_url=lambda: "postgresql://local/runtime")
         with (
