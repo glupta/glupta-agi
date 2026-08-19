@@ -1,5 +1,3 @@
-"""One durable, provider-fenced Crawl evidence workflow."""
-
 from __future__ import annotations
 
 import json
@@ -64,7 +62,8 @@ def _dispatch(packet: _CrawlModelPacket, admitted: Any, request_body: dict[str, 
     queue_deadline = packet.admitted_at.astimezone(UTC) + timedelta(seconds=profile.queue_timeout_seconds)  # noqa: E501
     return FrozenDispatch(workflow_id=packet.workflow_id, request_digest=admitted.request_digest,
         request_body_digest=contracts.canonical_digest(request_body), model=profile.model,
-        release_profile_digest=profile.digest(), disclosure_profile=admitted.disclosure_profile,
+        release_profile_digest=profile.digest(), region=profile.region, endpoint=profile.endpoint, price_schedule_id=profile.price_schedule_id, price_schedule_digest=profile.price_schedule_digest,  # noqa: E501
+        disclosure_profile=admitted.disclosure_profile,
         disclosure_notice_digest=admitted.disclosure_notice_digest, external_disclosure_ack=admitted.external_disclosure_ack, service_tier=profile.service_tier,  # noqa: E501
         project_id=profile.project_id, service_account_id=profile.service_account_id, api_key_id=profile.api_key_id, credential_generation=packet.credential_generation,  # noqa: E501
         input_token_upper_bound=input_bound, max_output_tokens=profile.max_output_tokens, max_usd_micros=profile.max_usd_micros, queue_deadline=queue_deadline,  # noqa: E501

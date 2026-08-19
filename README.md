@@ -9,7 +9,7 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Version `0.3.0` is a **dispatch-held candidate**, not a production release.
+Version `0.3.1` is a **dispatch-held candidate**, not a production release.
 It replaces the unsupported consumer-session route with a provider-supported
 OpenAI Responses API edge, while requiring external account and release evidence
 that this repository cannot manufacture.
@@ -29,8 +29,8 @@ Candidate controls:
   proxy configuration, `gpt-5.6-sol`, and `medium` reasoning;
 - the frozen effect binds the request-body and release-profile digests, a
   conservative 270,000-token input ceiling, 4,000-token total output/reasoning
-  ceiling, $1.85 USD upper-bound reservation (including the documented cache-write
-  premium), and 300-second queue/wall limits;
+  ceiling, $2.00 USD upper-bound reservation (including the documented cache-write
+  premium and regional-processing uplift), and 300-second queue/wall limits;
 - successful replay returns the recorded provider request/response IDs, token
   usage, conservative USD upper bound, and typed output instead of fabricating
   missing usage;
@@ -83,20 +83,46 @@ approved. The private mode-`0600` JSON profile must bind the dedicated OpenAI
 project/service-account/key identifiers and generation, disclosure and rights
 evidence, data terms and region, model, rate and token/USD/time ceilings, expiry,
 price schedule, manifest, SBOM, provenance, signature, approval, and isolated
-rollback rehearsal. The API key is a separate private mode-`0600` file and is
-read only after the durable effect reservation exists. Neither file is committed.
+rollback rehearsal. The API key is a separate private mode-`0600` file; startup
+validates its approved digest without a provider call, and the provider edge
+resolves it for dispatch only after the durable effect reservation exists.
+Neither file is committed.
 
-Once every independent release gate is satisfied, the operator may set the two
-absolute mount paths and start the profile:
+The image uses a digest-pinned, non-root Chainguard Python runtime. Compose 5.4
+cannot materialize non-file secrets into a read-only service, so the approved
+local broker invokes `scripts/stage_private_volumes.py` to stream one complete
+generation over stdin into fresh app/PostgreSQL Docker volumes. Compose mounts
+those volumes read-only; plaintext values and host secret paths never belong in
+this repository or a `.env` file. Preserve the immediately prior generation for
+rollback and delete a retired volume only after its rollback window closes.
+
+The release profile selects exactly `us` or `europe`, binds the corresponding
+regional Responses endpoint, and uses the frozen 10% regional price schedule.
+Static container addresses exist only so the separately approved Colima
+nftables/dnsmasq gate can default-deny app egress.
+
+Once every independent release gate is satisfied, the approved local secret
+broker supplies the four private values only to the staging subprocess. Its JSON
+receipt provides the two non-secret volume names used by Compose:
 
 ```sh
-export GLUPTA_RELEASE_PROFILE_FILE=/absolute/path/to/release-profile.json
-export GLUPTA_OPENAI_API_KEY_FILE=/absolute/path/to/openai-api-key
 export GLUPTA_CREDENTIAL_GENERATION=1
-export GLUPTA_UID=$(id -u) GLUPTA_GID=$(id -g)
+uv run --frozen python scripts/stage_private_volumes.py
+export GLUPTA_APP_PRIVATE_VOLUME=<app_volume-from-receipt>
+export GLUPTA_POSTGRES_PRIVATE_VOLUME=<postgres_volume-from-receipt>
 docker compose up -d --build --remove-orphans
 curl --fail http://127.0.0.1:8765/healthz
 ```
+
+Routine provider-key/profile rotation stages only a new app volume and preserves
+the existing PostgreSQL private volume:
+
+```sh
+uv run --frozen python scripts/stage_private_volumes.py --app-only
+```
+
+PostgreSQL password rotation is a separate database migration gate. Replacing
+`POSTGRES_PASSWORD_FILE` does not rotate the role in an existing data volume.
 
 Submit only explicitly selected `.md` or `.txt` files from `inputs/`. The
 bearer capability is required for `/v1/evidence-brief` and is never committed.

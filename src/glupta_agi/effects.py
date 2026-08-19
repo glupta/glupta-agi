@@ -1,5 +1,3 @@
-"""Atomic single-call model-effect fence and replay record."""
-
 from __future__ import annotations
 
 import json
@@ -18,7 +16,7 @@ class AmbiguousEffectError(RuntimeError):
 
 
 class EffectConflictError(RuntimeError):
-    """A workflow ID is already bound to a different valid dispatch."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -34,7 +32,8 @@ class Effect:
 
 
 _datasource: SQLAlchemyDatasource | None = None
-_SCHEMA_VERSION = "glupta-crawl-external-effects-v2"
+_SCHEMA_VERSION = "glupta-crawl-external-effects-v3"
+_TABLE = "crawl_external_effects_v3"
 _STATES = ("reserved", "dispatching", "returned", "reconciled", "failed", "unknown")
 _COLUMNS = {
     "workflow_id": ("TEXT", False), "slot_id": ("TEXT", False),
@@ -60,41 +59,34 @@ def _store() -> SQLAlchemyDatasource:
 def initialize(database_url: str) -> None:
     datasource = SQLAlchemyDatasource.create(database_url, schema="public")
     inspector = sa.inspect(datasource.engine)
-    existed = inspector.has_table("crawl_external_effects_v2", schema="public")
+    existed = inspector.has_table(_TABLE, schema="public")
     if (existed and inspector.get_table_comment(
-            "crawl_external_effects_v2", schema="public").get("text") != _SCHEMA_VERSION):
+            _TABLE, schema="public").get("text") != _SCHEMA_VERSION):
         raise RuntimeError("external effect schema version is not recognized")
     with datasource.engine.begin() as connection:
         connection.execute(
-            sa.text(
-                """
-                CREATE TABLE IF NOT EXISTS crawl_external_effects_v2 (
-                    workflow_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL,
-                    slot_id TEXT NOT NULL CHECK(slot_id='model-0'), dispatch_digest TEXT NOT NULL,
-                    max_calls INTEGER NOT NULL CHECK (max_calls = 1), dispatch_json JSONB NOT NULL,
-                    max_usd_micros INTEGER NOT NULL CHECK (max_usd_micros > 0),
-                    state TEXT NOT NULL CHECK (state IN (
-                        'reserved','dispatching','returned','reconciled','failed','unknown'
-                    )),
-                    result_json JSONB, audit_json JSONB, hold_reason TEXT,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
+            sa.text("CREATE TABLE IF NOT EXISTS crawl_external_effects_v3 ("
+                "workflow_id TEXT PRIMARY KEY,request_digest TEXT NOT NULL,"
+                "slot_id TEXT NOT NULL CHECK(slot_id='model-0'),dispatch_digest TEXT NOT NULL,"
+                "max_calls INTEGER NOT NULL CHECK(max_calls=1),dispatch_json JSONB NOT NULL,"
+                "max_usd_micros INTEGER NOT NULL CHECK(max_usd_micros>0),"
+                "state TEXT NOT NULL CHECK(state IN ('reserved','dispatching','returned',"
+                "'reconciled','failed','unknown')),result_json JSONB,audit_json JSONB,"
+                "hold_reason TEXT,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         )
         if not existed:
             connection.execute(sa.text(
-                f"COMMENT ON TABLE crawl_external_effects_v2 IS '{_SCHEMA_VERSION}'"))
+                f"COMMENT ON TABLE {_TABLE} IS '{_SCHEMA_VERSION}'"))
     inspector = sa.inspect(datasource.engine)
-    inspected_columns = inspector.get_columns("crawl_external_effects_v2", schema="public")
+    inspected_columns = inspector.get_columns(_TABLE, schema="public")
     columns = {
         str(column["name"]): (str(column["type"]).upper(), bool(column["nullable"]))
         for column in inspected_columns
     }
     primary_key = inspector.get_pk_constraint(
-        "crawl_external_effects_v2", schema="public").get("constrained_columns")
+        _TABLE, schema="public").get("constrained_columns")
     checks = " ".join(str(check.get("sqltext", "")) for check in
-        inspector.get_check_constraints("crawl_external_effects_v2", schema="public"))
+        inspector.get_check_constraints(_TABLE, schema="public"))
     if columns != _COLUMNS or primary_key != ["workflow_id"]:
         raise RuntimeError("external effect schema does not match the Crawl contract")
     updated_at = next(column for column in inspected_columns if column["name"] == "updated_at")
@@ -147,6 +139,9 @@ def _effect(row: dict[str, Any]) -> Effect:
         invalid = (provider_audit.workflow_id != frozen.workflow_id,
             provider_audit.request_digest != frozen.request_digest,
             provider_audit.release_profile_digest != frozen.release_profile_digest,
+            provider_audit.region != frozen.region, provider_audit.endpoint != frozen.endpoint,
+            provider_audit.price_schedule_id != frozen.price_schedule_id,
+            provider_audit.price_schedule_digest != frozen.price_schedule_digest,
             provider_audit.request_body_digest != frozen.request_body_digest,
             provider_audit.requested_model != frozen.model, provider_audit.returned_model != frozen.model,  # noqa: E501
             provider_audit.service_tier != frozen.service_tier, provider_audit.status != "completed",  # noqa: E501
@@ -167,17 +162,10 @@ def reserve(dispatch: dict[str, Any], dispatch_digest: str) -> Effect:
     def transaction() -> Effect:
         session = datasource.sql_session()
         session.execute(
-            sa.text(
-                """
-                INSERT INTO crawl_external_effects_v2 (
-                    workflow_id,slot_id,request_digest,dispatch_digest,max_calls,max_usd_micros,
-                    state,dispatch_json
-                ) VALUES (
-                    :workflow_id,'model-0',:request_digest,:dispatch_digest,1,:max_usd_micros,
-                    'reserved',CAST(:dispatch_json AS JSONB)
-                ) ON CONFLICT (workflow_id) DO NOTHING
-                """
-            ),
+            sa.text("INSERT INTO crawl_external_effects_v3 (workflow_id,slot_id,request_digest,"
+                "dispatch_digest,max_calls,max_usd_micros,state,dispatch_json) VALUES "
+                "(:workflow_id,'model-0',:request_digest,:dispatch_digest,1,:max_usd_micros,"
+                "'reserved',CAST(:dispatch_json AS JSONB)) ON CONFLICT (workflow_id) DO NOTHING"),
             {
                 **dispatch, "dispatch_digest": dispatch_digest,
                 "dispatch_json": json.dumps(dispatch, sort_keys=True),
@@ -185,10 +173,7 @@ def reserve(dispatch: dict[str, Any], dispatch_digest: str) -> Effect:
         )
         row = (
             session.execute(
-                sa.text(
-                    "SELECT * FROM crawl_external_effects_v2 "
-                    "WHERE workflow_id=:workflow_id FOR UPDATE"
-                ),
+                sa.text("SELECT * FROM crawl_external_effects_v3 WHERE workflow_id=:workflow_id FOR UPDATE"),  # noqa: E501
                 {"workflow_id": dispatch["workflow_id"]},
             )
             .mappings()
@@ -214,19 +199,12 @@ def transition(
         row = (
             datasource.sql_session()
             .execute(
-                sa.text(
-                    """
-                UPDATE crawl_external_effects_v2 SET state=:state,
-                    result_json=COALESCE(result_json,CAST(:result AS JSONB)),
-                    audit_json=COALESCE(audit_json,CAST(:audit AS JSONB)),
-                    hold_reason=COALESCE(:reason,hold_reason),updated_at=NOW()
-                WHERE workflow_id=:workflow_id AND (
-                    state=:expected OR :recover AND state IN (
-                        'dispatching','returned','reconciled','failed','unknown'
-                    )
-                ) RETURNING *
-                """
-                ),
+                sa.text("UPDATE crawl_external_effects_v3 SET state=:state,"
+                    "result_json=COALESCE(result_json,CAST(:result AS JSONB)),"
+                    "audit_json=COALESCE(audit_json,CAST(:audit AS JSONB)),"
+                    "hold_reason=COALESCE(:reason,hold_reason),updated_at=NOW() "
+                    "WHERE workflow_id=:workflow_id AND (state=:expected OR :recover AND state IN "
+                    "('dispatching','returned','reconciled','failed','unknown')) RETURNING *"),
                 {
                     "state": state, "reason": hold_reason, "workflow_id": workflow_id,
                     "expected": expected, "recover": recover_post_dispatch,

@@ -1,5 +1,3 @@
-"""Authenticated loopback FastAPI adapter for evidence_brief_v1."""
-
 from __future__ import annotations
 
 import uuid

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from glupta_agi.inference import PINNED_MODEL
+from glupta_agi.inference import PINNED_MODEL, usd_upper_bound
 from glupta_agi.settings import Settings, SettingsError, get_settings
 from tests.helpers import private_file, release_profile, write_profile
 
@@ -40,6 +40,18 @@ def _assert_product_exception_sanitized(error: BaseException, *markers: str) -> 
 
 
 class SettingsTests(unittest.TestCase):
+    def test_regional_endpoint_and_uplifted_price_are_frozen(self) -> None:
+        self.assertEqual(usd_upper_bound(270_000, 4_000), 1_988_250)
+        self.assertEqual(usd_upper_bound(1, 0), 7)
+        self.assertEqual(release_profile(region="europe", endpoint="https://eu.api.openai.com/v1").region, "europe")  # noqa: E501
+        for changes in (
+            {"region": "europe"},
+            {"schema_version": "crawl-openai-release-v1"},
+            {"max_usd_micros": 1_850_000},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                release_profile(**changes)
+
     def test_every_release_profile_field_is_required_and_frozen_policy_cannot_drift(self) -> None:
         raw = release_profile().model_dump(mode="json")
         for field in raw:
@@ -68,7 +80,7 @@ class SettingsTests(unittest.TestCase):
         finally:
             get_settings.cache_clear()
 
-    def test_loads_complete_release_profile_without_reading_key_contents(self) -> None:
+    def test_loads_complete_release_profile_and_validates_key_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             token = private_file(root, "intake-token", "t" * 32)
@@ -99,7 +111,21 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(settings.authenticates("t" * 32))
             self.assertEqual(settings.model, PINNED_MODEL)
             self.assertEqual(settings.release_profile_digest, release_profile().digest())
-            self.assertEqual(opened, [profile_path, token])
+            self.assertEqual(opened, [profile_path, key, token])
+
+    def test_startup_rejects_key_bytes_that_do_not_match_release_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            token = private_file(root, "intake-token", "t" * 32)
+            key = private_file(root, "api-key", "wrong-api-key-" + "x" * 32)
+            with (
+                patch.dict(os.environ, {"GLUPTA_INTAKE_TOKEN_FILE": str(token),
+                    "GLUPTA_RELEASE_PROFILE_FILE": str(write_profile(root)),
+                    "GLUPTA_OPENAI_API_KEY_FILE": str(key),
+                    "GLUPTA_CREDENTIAL_GENERATION": "1"}, clear=True),
+                self.assertRaisesRegex(SettingsError, "does not match release evidence"),
+            ):
+                Settings.from_environment()
 
     def test_missing_unsafe_or_expired_release_evidence_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

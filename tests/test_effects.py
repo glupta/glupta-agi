@@ -15,7 +15,7 @@ from glupta_agi.contracts import (
     provider_record_digest,
 )
 from glupta_agi.effects import AmbiguousEffectError, _effect, hold_unknown, initialize
-from glupta_agi.inference import FrozenDispatch
+from glupta_agi.inference import PRICE_SCHEDULE, PRICE_SCHEDULE_DIGEST, FrozenDispatch
 
 
 def _row(**overrides: object) -> dict[str, object]:
@@ -24,6 +24,10 @@ def _row(**overrides: object) -> dict[str, object]:
         request_digest="a" * 64,
         request_body_digest="c" * 64,
         release_profile_digest="d" * 64,
+        region="us",
+        endpoint="https://us.api.openai.com/v1",
+        price_schedule_id=PRICE_SCHEDULE,
+        price_schedule_digest=PRICE_SCHEDULE_DIGEST,
         disclosure_profile="external_disclosed_v1",
         disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
         external_disclosure_ack=True,
@@ -43,7 +47,7 @@ def _row(**overrides: object) -> dict[str, object]:
         "request_digest": dispatch.request_digest,
         "dispatch_digest": dispatch.digest(),
         "max_calls": 1,
-        "max_usd_micros": 1_850_000,
+        "max_usd_micros": 2_000_000,
         "state": "reserved",
         "dispatch_json": dispatch_json,
         "result_json": None,
@@ -58,7 +62,7 @@ def _row(**overrides: object) -> dict[str, object]:
     [
         {"slot_id": "model-1"},
         {"max_calls": 2},
-        {"max_usd_micros": 1_850_001},
+        {"max_usd_micros": 2_000_001},
         {"dispatch_json": None},
         {"dispatch_digest": "b" * 64},
         {
@@ -84,7 +88,7 @@ def test_effect_row_retains_frozen_dispatch_result_and_audit() -> None:
     )
     case = TestCase()
     case.assertEqual(effect.state, "reserved")
-    case.assertEqual(effect.dispatch["max_usd_micros"], 1_850_000)
+    case.assertEqual(effect.dispatch["max_usd_micros"], 2_000_000)
     case.assertEqual(effect.dispatch["queue_deadline"], "2099-01-01T00:00:00Z")
     case.assertEqual(effect.result, {"answer": "grounded"})
     case.assertEqual(effect.audit, {"total_tokens": 10})
@@ -99,6 +103,10 @@ def _bound_result_and_audit() -> tuple[dict[str, object], dict[str, object]]:
         workflow_id="0198be50-0000-7000-8000-000000000000",
         request_digest="a" * 64,
         release_profile_digest="d" * 64,
+        region="us",
+        endpoint="https://us.api.openai.com/v1",
+        price_schedule_id=PRICE_SCHEDULE,
+        price_schedule_digest=PRICE_SCHEDULE_DIGEST,
         client_request_id="client_1",
         provider_request_id="req_1",
         response_id="resp_1",
@@ -112,7 +120,7 @@ def _bound_result_and_audit() -> tuple[dict[str, object], dict[str, object]]:
         output_tokens=20,
         reasoning_tokens=5,
         total_tokens=120,
-        cost_upper_bound_micros=1_225,
+        cost_upper_bound_micros=1_348,
         request_body_digest="c" * 64,
         output_digest="e" * 64,
         validated_result_digest=canonical_digest(result),
@@ -139,7 +147,11 @@ def test_reconciled_effect_requires_exact_result_dispatch_and_audit_binding() ->
         (result, {**audit, "request_body_digest": "f" * 64}),
         (result, {**audit, "requested_model": "drifted"}),
         (result, {**audit, "service_tier": "priority"}),
-        (result, {**audit, "cost_upper_bound_micros": 1_850_001}),
+        (result, {**audit, "region": "europe"}),
+        (result, {**audit, "endpoint": "https://eu.api.openai.com/v1"}),
+        (result, {**audit, "price_schedule_id": "drifted"}),
+        (result, {**audit, "price_schedule_digest": "f" * 64}),
+        (result, {**audit, "cost_upper_bound_micros": 2_000_001}),
         (result, {**audit, "returned_model": "drifted"}),
         (result, {**audit, "status": "failed"}),
         (result, {**audit, "total_tokens": 999}),

@@ -1,5 +1,3 @@
-"""Fail-closed intake for explicitly selected local text files."""
-
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +14,7 @@ ALLOWED_SUFFIXES = {".md", ".txt"}
 
 
 class IntakeError(ValueError):
-    """The request does not satisfy the frozen Crawl intake contract."""
+    pass
 
 
 @dataclass(frozen=True)

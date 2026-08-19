@@ -32,7 +32,7 @@ class ReleaseBoundaryTests(TestCase):
 
         self.assertEqual(project["project"]["version"], __version__)
         self.assertEqual(metadata("glupta-agi")["Version"], __version__)
-        self.assertNotIn('"0.3.0"', (SOURCE / "__init__.py").read_text(encoding="utf-8"))
+        self.assertNotIn(__version__, (SOURCE / "__init__.py").read_text(encoding="utf-8"))
         self.assertEqual(app.version, __version__)
         settings = SimpleNamespace(dbos_system_database_url=lambda: "postgresql://local/runtime")
         with (
@@ -69,8 +69,16 @@ class ReleaseBoundaryTests(TestCase):
     def test_container_and_database_bases_are_digest_pinned(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-        self.assertEqual(dockerfile.count("@sha256:"), 2)
+        self.assertEqual(dockerfile.count("@sha256:"), 3)
         self.assertIn("--no-install-project", dockerfile)
-        self.assertIn("COPY --from=build --chown=10001:10001 /app/.venv /app/.venv", dockerfile)
+        self.assertIn("COPY --from=build --chown=65532:65532 /app/.venv /app/.venv", dockerfile)
+        self.assertIn('ENTRYPOINT ["/app/.venv/bin/python"]', dockerfile)
         self.assertIn("postgres:17.6-bookworm@sha256:", compose)
         self.assertIn("GLUPTA_CREDENTIAL_GENERATION:?", compose)
+        self.assertNotIn("GLUPTA_UID", compose)
+        self.assertNotIn("secrets:", compose)
+        self.assertIn("GLUPTA_APP_PRIVATE_VOLUME", compose)
+        self.assertIn("GLUPTA_POSTGRES_PRIVATE_VOLUME", compose)
+        self.assertEqual(compose.count("nocopy: true"), 2)
+        self.assertIn("ipv4_address: 172.30.47.2", compose)
+        self.assertIn("enable_ipv6: false", compose)

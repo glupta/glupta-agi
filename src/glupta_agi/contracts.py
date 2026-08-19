@@ -1,5 +1,3 @@
-"""Typed request and result contracts for evidence_brief_v1."""
-
 from __future__ import annotations
 
 import hashlib
@@ -45,10 +43,14 @@ def canonical_digest(value: object) -> str:
 
 class ProviderAudit(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: str = "crawl-openai-audit-v1"
+    schema_version: str = "crawl-openai-audit-v2"
     workflow_id: str
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     release_profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    region: Literal["us", "europe"]
+    endpoint: str
+    price_schedule_id: str
+    price_schedule_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     client_request_id: str
     provider_request_id: str
     response_id: str
@@ -83,16 +85,19 @@ class ProviderResult(BaseModel):
 
 
 def validate_provider_record(record: ProviderResult) -> ProviderResult:
-    from .inference import usd_upper_bound
+    from . import inference
 
     result_digest = canonical_digest(record.brief.model_dump(mode="json"))
     audit = record.audit
     if (audit.validated_result_digest != result_digest
             or audit.record_digest != provider_record_digest(record.brief, audit)
+            or audit.endpoint != inference.REGIONAL_ENDPOINTS[audit.region]
+            or audit.price_schedule_id != inference.PRICE_SCHEDULE
+            or audit.price_schedule_digest != inference.PRICE_SCHEDULE_DIGEST
             or audit.total_tokens != audit.input_tokens + audit.output_tokens
             or audit.cached_input_tokens + audit.cache_write_input_tokens > audit.input_tokens
             or audit.reasoning_tokens > audit.output_tokens
-            or audit.cost_upper_bound_micros != usd_upper_bound(audit.input_tokens,
+            or audit.cost_upper_bound_micros != inference.usd_upper_bound(audit.input_tokens,
                                                                  audit.output_tokens)):
         raise ValueError("provider result does not match its audit")
     return record

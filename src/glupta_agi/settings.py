@@ -1,5 +1,3 @@
-"""Fail-closed runtime settings and file-backed capability metadata."""
-
 from __future__ import annotations
 
 import hmac
@@ -11,6 +9,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from .inference import PINNED_MODEL, ReleaseProfile
+from .openai_adapter import AdapterError, validate_api_key
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
 
@@ -92,6 +91,13 @@ class Settings:
             raise SettingsError("credential generation is unavailable") from None
         if generation < 1 or generation != profile.credential_generation:
             raise SettingsError("credential generation does not match the release profile")
+        invalid_credential = False
+        try:
+            validate_api_key(credential_path, profile.credential_sha256)
+        except AdapterError:
+            invalid_credential = True
+        if invalid_credential:
+            raise SettingsError("OpenAI credential does not match release evidence") from None
         token_path = Path(os.environ.get("GLUPTA_INTAKE_TOKEN_FILE", "/run/private/intake-token"))
         token = _read_private_file(
             token_path, label="intake capability", maximum_bytes=4096, minimum=32)

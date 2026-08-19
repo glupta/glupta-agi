@@ -1,5 +1,3 @@
-"""Prompt construction, citation verification, and stable Markdown rendering."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
