@@ -127,11 +127,19 @@ The volume must carry `com.glupta.private=true`,
 `com.glupta.purpose=codex-subscription`, and the matching
 `com.glupta.generation` label. The attestor runs the exact image with no network,
 a read-only root, no capabilities, and the volume mounted read-only. It reads
-only filesystem metadata and the top-level filename inventory: `/run/codex`
-must be owned by UID 65532 at mode `0700`, and its only entry must be a regular
-UID-65532 mode-`0600` `auth.json`. It never reads authentication bytes or proves
-the account/plan. Account identity, live route egress, and official-login
-rotation remain independent deployment gates.
+only filesystem metadata and exact filename inventories. `/run/codex` must be
+owned by UID 65532 at mode `0700` and contain exactly the official completed
+Codex 0.147.0 file-store login layout: a regular mode-`0600`, single-link
+`auth.json`; `log/codex-login.log`, also regular mode `0600` and single-link;
+and an empty mode-`0700` `tmp/arg0` directory. Every node must be owned by UID
+65532; the `log` and `tmp` directories must grant their owner full access and
+must have no special or group/world write bits. The attestor rejects incomplete
+pre-authentication state, stale arg0 sessions, symlinks, and any additional
+configuration or state. It records the umask-derived `log` and `tmp` modes but
+does not inspect file contents. It never reads authentication bytes or log
+bytes and does not prove the account/plan.
+Account identity, live route egress, and official-login rotation remain
+independent deployment gates.
 The receipt is point-in-time metadata evidence: re-run it against the same
 volume and image immediately before the separately approved Compose start.
 

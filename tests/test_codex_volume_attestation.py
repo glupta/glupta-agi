@@ -18,6 +18,29 @@ def _completed(stdout: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], 0, stdout, "")
 
 
+def _probe() -> dict[str, object]:
+    return {
+        "root_uid": 65532,
+        "root_mode": "0700",
+        "auth_uid": 65532,
+        "auth_mode": "0600",
+        "auth_nlink": 1,
+        "inventory": ["auth.json", "log", "tmp"],
+        "log_uid": 65532,
+        "log_mode": "0755",
+        "log_inventory": ["codex-login.log"],
+        "login_log_uid": 65532,
+        "login_log_mode": "0600",
+        "login_log_nlink": 1,
+        "tmp_uid": 65532,
+        "tmp_mode": "0700",
+        "tmp_inventory": ["arg0"],
+        "arg0_uid": 65532,
+        "arg0_mode": "0700",
+        "arg0_inventory": [],
+    }
+
+
 def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
     volume = {
@@ -28,13 +51,7 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
             "com.glupta.generation": "7",
         },
     }
-    probe = {
-        "root_uid": 65532,
-        "root_mode": "0700",
-        "auth_uid": 65532,
-        "auth_mode": "0600",
-        "inventory": ["auth.json"],
-    }
+    probe = _probe()
 
     def run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((arguments, kwargs))
@@ -60,13 +77,26 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
     receipt = json.loads(capsys.readouterr().out)
     assert receipt == {
         "auth_mode": "0600",
+        "auth_nlink": 1,
         "auth_uid": 65532,
+        "arg0_inventory": [],
+        "arg0_mode": "0700",
+        "arg0_uid": 65532,
         "generation": 7,
         "image_id": IMAGE_ID,
-        "inventory": ["auth.json"],
+        "inventory": ["auth.json", "log", "tmp"],
+        "log_inventory": ["codex-login.log"],
+        "log_mode": "0755",
+        "log_uid": 65532,
+        "login_log_mode": "0600",
+        "login_log_nlink": 1,
+        "login_log_uid": 65532,
         "root_mode": "0700",
         "root_uid": 65532,
-        "schema_version": "glupta-codex-volume-attestation-v1",
+        "schema_version": "glupta-codex-volume-attestation-v2",
+        "tmp_inventory": ["arg0"],
+        "tmp_mode": "0700",
+        "tmp_uid": 65532,
         "volume": VOLUME,
     }
     probe_arguments, _probe_kwargs = calls[2]
@@ -77,6 +107,9 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
     assert ("--user", "65532:65532") in pairs
     assert ("--mount", f"type=volume,src={VOLUME},dst=/run/codex,readonly") in pairs
     assert probe_arguments[-3:] == [IMAGE_ID, "-c", attestation.PROBE]
+    assert "os.lstat" in attestation.PROBE
+    assert "os.listdir" in attestation.PROBE
+    assert "open(" not in attestation.PROBE
     assert all(
         kwargs["env"] == {"HOME": "/reviewed/home", "PATH": attestation.os.defpath}
         for _, kwargs in calls
@@ -98,6 +131,84 @@ def test_rejects_noncanonical_arguments_before_docker(arguments, capsys) -> None
         assert attestation.main(arguments) == 2
     run.assert_not_called()
     assert "usage:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("inventory", ["log", "tmp"]),
+        ("inventory", ["auth.json"]),
+        ("inventory", ["auth.json", "config.toml", "log", "tmp"]),
+        ("log_inventory", []),
+        ("log_inventory", ["codex-login.log", "extra.log"]),
+        ("tmp_inventory", ["arg0", "state"]),
+        ("arg0_inventory", ["codex-arg0-stale"]),
+        ("root_mode", "0755"),
+        ("auth_uid", 0),
+        ("auth_mode", "0640"),
+        ("auth_nlink", 2),
+        ("login_log_uid", 0),
+        ("login_log_mode", "0644"),
+        ("login_log_nlink", 2),
+        ("arg0_uid", 0),
+        ("arg0_mode", "0755"),
+        ("log_mode", "0775"),
+        ("tmp_mode", "2700"),
+        ("tmp_mode", "0600"),
+        ("tmp_mode", "invalid"),
+    ],
+)
+def test_rejects_incomplete_extra_or_unsafe_native_layout(field, value) -> None:
+    probe = _probe()
+    probe[field] = value
+    volume = {
+        "Name": VOLUME,
+        "Labels": {
+            **attestation.EXPECTED_LABELS,
+            "com.glupta.generation": "7",
+        },
+    }
+    responses = iter((json.dumps(volume), IMAGE_ID + "\n", json.dumps(probe)))
+    with (
+        patch.object(attestation, "_run", side_effect=lambda _arguments: next(responses)),
+        pytest.raises(attestation.AttestationError, match="metadata is invalid"),
+    ):
+        attestation._attest("/reviewed/bin/docker", VOLUME, 7, IMAGE_ID)
+
+
+def test_probe_failure_covers_wrong_type_or_symlink_without_exposing_metadata(capsys) -> None:
+    marker = "private-path-marker"
+    volume = {
+        "Name": VOLUME,
+        "Labels": {
+            **attestation.EXPECTED_LABELS,
+            "com.glupta.generation": "7",
+        },
+    }
+    calls = 0
+
+    def run(arguments, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _completed(json.dumps(volume))
+        if calls == 2:
+            return _completed(IMAGE_ID + "\n")
+        return subprocess.CompletedProcess([], 2, marker, marker)
+
+    with (
+        patch.object(attestation.shutil, "which", return_value="/reviewed/bin/docker"),
+        patch.object(attestation.subprocess, "run", side_effect=run),
+    ):
+        assert (
+            attestation.main(
+                ["--volume", VOLUME, "--generation", "7", "--image-id", IMAGE_ID]
+            )
+            == 1
+        )
+    captured = capsys.readouterr()
+    assert marker not in captured.out + captured.err
+    assert captured.err == "Codex subscription volume attestation failed\n"
 
 
 def test_label_or_probe_mismatch_fails_closed_without_sensitive_output(capsys) -> None:
