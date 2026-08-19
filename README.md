@@ -172,7 +172,8 @@ grant their owner full access and must have no special or group/world write
 bits. The attestor rejects incomplete pre-authentication state, zero or
 multiple arg0 sessions, alternate symlink targets, and any missing or
 additional configuration or state. It records inventories and modes only and
-never reads authentication or log bytes or proves the account/plan.
+does not prove the account/plan. It never reads authentication bytes or log
+bytes.
 Account identity, live route egress, and official-login rotation remain
 independent deployment gates.
 The receipt is point-in-time metadata evidence: re-run it against the same
