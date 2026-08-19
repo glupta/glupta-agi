@@ -1,0 +1,16 @@
+{
+  "schema_version": "glupta-subscription-rollback-rehearsal-v1",
+  "source_revision": "f19a458246de6529e7fcfc61f94498a3401dc12d",
+  "candidate_image": "sha256:6f8af6a08661f8315d1285e8764ec8b260097426ccd3b8c6d937218250bc9850",
+  "rollback_image": "sha256:2c6d1d300c1f0f83dff644b2332868c1d815703addf6a5e8ef00cfe730fd5fa7",
+  "cold_start": true,
+  "restart": true,
+  "rollback": true,
+  "forward_restore": true,
+  "steady_services": [
+    "app",
+    "postgres"
+  ],
+  "provider_dispatch": false,
+  "synthetic_only": true
+}
