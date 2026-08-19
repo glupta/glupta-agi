@@ -20,69 +20,86 @@ EXPECTED_LABELS = {
     "com.glupta.private": "true",
     "com.glupta.purpose": "codex-subscription",
 }
-PROBE = """import json, os, stat
+SESSION_PATTERN = re.compile(r"codex-arg0[A-Za-z0-9]{6}\Z")
+CODEX_BINARY_TARGET = "/app/.venv/lib/python3.14/site-packages/codex_cli_bin/bin/codex"
+EXPECTED_SESSION_INVENTORY = [
+    ".lock",
+    "apply_patch",
+    "applypatch",
+    "codex-execve-wrapper",
+    "codex-linux-sandbox",
+]
+PROBE = """import json, os, re, stat
 base = '/run/codex'
-root = os.lstat(base)
 names = sorted(os.listdir(base))
-auth = os.lstat(base + '/auth.json') if names == ['auth.json', 'log', 'tmp'] else None
-log = os.lstat(base + '/log') if auth is not None else None
-tmp = os.lstat(base + '/tmp') if auth is not None else None
-log_names = (
-    sorted(os.listdir(base + '/log'))
-    if log is not None and stat.S_ISDIR(log.st_mode) else None
-)
-tmp_names = (
-    sorted(os.listdir(base + '/tmp'))
-    if tmp is not None and stat.S_ISDIR(tmp.st_mode) else None
-)
-login_log = os.lstat(base + '/log/codex-login.log') if log_names == ['codex-login.log'] else None
-arg0 = os.lstat(base + '/tmp/arg0') if tmp_names == ['arg0'] else None
-arg0_names = (
-    sorted(os.listdir(base + '/tmp/arg0'))
-    if arg0 is not None and stat.S_ISDIR(arg0.st_mode) else None
-)
-directory_mode = lambda item: stat.S_IMODE(item.st_mode)
-private_created_dir = lambda item: all((
-    stat.S_ISDIR(item.st_mode), item.st_uid == 65532,
-    directory_mode(item) & 0o700 == 0o700,
-    directory_mode(item) & 0o7022 == 0,
-))
-valid = all((
-    stat.S_ISDIR(root.st_mode), stat.S_IMODE(root.st_mode) == 0o700,
-    root.st_uid == 65532, auth is not None,
-    auth is not None and stat.S_ISREG(auth.st_mode),
-    auth is not None and stat.S_IMODE(auth.st_mode) == 0o600,
-    auth is not None and auth.st_uid == 65532, auth is not None and auth.st_nlink == 1,
-    log is not None and private_created_dir(log),
-    tmp is not None and private_created_dir(tmp),
-    login_log is not None and stat.S_ISREG(login_log.st_mode),
-    login_log is not None and stat.S_IMODE(login_log.st_mode) == 0o600,
-    login_log is not None and login_log.st_uid == 65532,
-    login_log is not None and login_log.st_nlink == 1,
-    arg0 is not None and stat.S_ISDIR(arg0.st_mode),
-    arg0 is not None and stat.S_IMODE(arg0.st_mode) == 0o700,
-    arg0 is not None and arg0.st_uid == 65532, arg0_names == [],
-))
-if not valid:
+if names != ['auth.json', 'log', 'tmp']:
     raise SystemExit(2)
+paths = {
+    'root': base,
+    'auth': base + '/auth.json',
+    'log': base + '/log',
+    'login_log': base + '/log/codex-login.log',
+    'tmp': base + '/tmp',
+    'arg0': base + '/tmp/arg0',
+}
+stats = {name: os.lstat(path) for name, path in paths.items()}
+if not all(stat.S_ISDIR(stats[name].st_mode) for name in ('root', 'log', 'tmp', 'arg0')):
+    raise SystemExit(2)
+inventories = {
+    'root': names,
+    'log': sorted(os.listdir(paths['log'])),
+    'tmp': sorted(os.listdir(paths['tmp'])),
+    'arg0': sorted(os.listdir(paths['arg0'])),
+}
+if inventories['log'] != ['codex-login.log'] or inventories['tmp'] != ['arg0']:
+    raise SystemExit(2)
+valid_session_name = (
+    len(inventories['arg0']) == 1
+    and re.fullmatch(r'codex-arg0[A-Za-z0-9]{6}', inventories['arg0'][0]) is not None
+)
+if not valid_session_name:
+    raise SystemExit(2)
+session_name = inventories['arg0'][0]
+session_path = paths['arg0'] + '/' + session_name
+stats['session'] = os.lstat(session_path)
+if not stat.S_ISDIR(stats['session'].st_mode):
+    raise SystemExit(2)
+inventories['session'] = sorted(os.listdir(session_path))
+expected_helpers = [
+    '.lock', 'apply_patch', 'applypatch', 'codex-execve-wrapper', 'codex-linux-sandbox'
+]
+if inventories['session'] != expected_helpers:
+    raise SystemExit(2)
+helper_names = {
+    'lock': '.lock',
+    'apply_patch': 'apply_patch',
+    'applypatch': 'applypatch',
+    'codex_execve_wrapper': 'codex-execve-wrapper',
+    'codex_linux_sandbox': 'codex-linux-sandbox',
+}
+for key, filename in helper_names.items():
+    stats[key] = os.lstat(session_path + '/' + filename)
+def node(value, path):
+    if stat.S_ISDIR(value.st_mode):
+        kind = 'directory'
+    elif stat.S_ISREG(value.st_mode):
+        kind = 'regular'
+    elif stat.S_ISLNK(value.st_mode):
+        kind = 'symlink'
+    else:
+        kind = 'other'
+    result = {'type': kind, 'uid': value.st_uid, 'mode': format(stat.S_IMODE(value.st_mode), '04o')}
+    if kind in ('regular', 'symlink'):
+        result['nlink'] = value.st_nlink
+    if kind == 'symlink':
+        result['target'] = os.readlink(path)
+    return result
+node_paths = {**paths, 'session': session_path}
+node_paths.update({key: session_path + '/' + filename for key, filename in helper_names.items()})
 print(json.dumps({
-    'root_uid': root.st_uid, 'root_mode': format(stat.S_IMODE(root.st_mode), '04o'),
-    'auth_uid': auth.st_uid,
-    'auth_mode': format(stat.S_IMODE(auth.st_mode), '04o'),
-    'auth_nlink': auth.st_nlink,
-    'log_uid': log.st_uid,
-    'log_mode': format(directory_mode(log), '04o'),
-    'log_inventory': log_names,
-    'login_log_uid': login_log.st_uid,
-    'login_log_mode': format(stat.S_IMODE(login_log.st_mode), '04o'),
-    'login_log_nlink': login_log.st_nlink,
-    'tmp_uid': tmp.st_uid,
-    'tmp_mode': format(directory_mode(tmp), '04o'),
-    'tmp_inventory': tmp_names,
-    'arg0_uid': arg0.st_uid,
-    'arg0_mode': format(stat.S_IMODE(arg0.st_mode), '04o'),
-    'arg0_inventory': arg0_names,
-    'inventory': names,
+    'session_name': session_name,
+    'inventories': inventories,
+    'nodes': {name: node(value, node_paths[name]) for name, value in stats.items()},
 }, sort_keys=True))
 """
 
@@ -147,11 +164,103 @@ def _private_created_directory_mode(value: Any) -> bool:
     return mode & 0o700 == 0o700 and mode & 0o7022 == 0
 
 
+def _node(
+    nodes: object,
+    name: str,
+    *,
+    kind: str,
+    mode: str | None = None,
+    private_directory: bool = False,
+    target: str | None = None,
+) -> bool:
+    if not isinstance(nodes, dict) or not isinstance(nodes.get(name), dict):
+        return False
+    value = nodes[name]
+    expected_keys = {"type", "uid", "mode"}
+    if kind in {"regular", "symlink"}:
+        expected_keys.add("nlink")
+    if kind == "symlink":
+        expected_keys.add("target")
+    return all(
+        (
+            set(value) == expected_keys,
+            value.get("type") == kind,
+            type(value.get("uid")) is int,
+            value.get("uid") == APP_UID,
+            mode is None or value.get("mode") == mode,
+            not private_directory or _private_created_directory_mode(value.get("mode")),
+            kind not in {"regular", "symlink"} or value.get("nlink") == 1,
+            target is None or value.get("target") == target,
+        )
+    )
+
+
+def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    session_name = probe.get("session_name")
+    inventories = probe.get("inventories")
+    nodes = probe.get("nodes")
+    expected_inventories = {
+        "root": ["auth.json", "log", "tmp"],
+        "log": ["codex-login.log"],
+        "tmp": ["arg0"],
+        "arg0": [session_name],
+        "session": EXPECTED_SESSION_INVENTORY,
+    }
+    aliases = {
+        "apply_patch",
+        "applypatch",
+        "codex_execve_wrapper",
+        "codex_linux_sandbox",
+    }
+    node_names = {
+        "root",
+        "auth",
+        "log",
+        "login_log",
+        "tmp",
+        "arg0",
+        "session",
+        "lock",
+        *aliases,
+    }
+    valid = all(
+        (
+            set(probe) == {"session_name", "inventories", "nodes"},
+            isinstance(session_name, str),
+            isinstance(session_name, str) and SESSION_PATTERN.fullmatch(session_name) is not None,
+            inventories == expected_inventories,
+            isinstance(nodes, dict) and set(nodes) == node_names,
+            _node(nodes, "root", kind="directory", mode="0700"),
+            _node(nodes, "auth", kind="regular", mode="0600"),
+            _node(nodes, "log", kind="directory", private_directory=True),
+            _node(nodes, "login_log", kind="regular", mode="0600"),
+            _node(nodes, "tmp", kind="directory", private_directory=True),
+            _node(nodes, "arg0", kind="directory", mode="0700"),
+            _node(nodes, "session", kind="directory", mode="0755"),
+            _node(nodes, "lock", kind="regular", mode="0644"),
+            all(
+                _node(
+                    nodes,
+                    name,
+                    kind="symlink",
+                    mode="0777",
+                    target=CODEX_BINARY_TARGET,
+                )
+                for name in aliases
+            ),
+        )
+    )
+    if not valid:
+        raise AttestationError("Codex subscription volume metadata is invalid")
+    return {
+        "inventories": expected_inventories,
+        "modes": {name: nodes[name]["mode"] for name in sorted(node_names)},
+    }
+
+
 def _attest(docker: str, volume: str, generation: int, image_id: str) -> dict[str, Any]:
     prefix = [docker, "--context", "colima"]
-    metadata = _json(
-        _run([*prefix, "volume", "inspect", volume, "--format", "{{json .}}"])
-    )
+    metadata = _json(_run([*prefix, "volume", "inspect", volume, "--format", "{{json .}}"]))
     labels = metadata.get("Labels")
     expected = {**EXPECTED_LABELS, "com.glupta.generation": str(generation)}
     invalid_labels = not isinstance(labels, dict) or any(
@@ -159,72 +268,44 @@ def _attest(docker: str, volume: str, generation: int, image_id: str) -> dict[st
     )
     if metadata.get("Name") != volume or invalid_labels:
         raise AttestationError("Codex subscription volume identity is invalid")
-    observed_image = _run(
-        [*prefix, "image", "inspect", image_id, "--format", "{{.Id}}"]
-    ).strip()
+    observed_image = _run([*prefix, "image", "inspect", image_id, "--format", "{{.Id}}"]).strip()
     if observed_image != image_id:
         raise AttestationError("Codex subscription image identity is invalid")
-    probe = _json(
-        _run(
-            [
-                *prefix,
-                "run",
-                "--rm",
-                "--pull",
-                "never",
-                "--network",
-                "none",
-                "--read-only",
-                "--security-opt",
-                "no-new-privileges:true",
-                "--cap-drop",
-                "ALL",
-                "--user",
-                f"{APP_UID}:{APP_UID}",
-                "--mount",
-                f"type=volume,src={volume},dst=/run/codex,readonly",
-                "--entrypoint",
-                "/app/.venv/bin/python",
-                image_id,
-                "-c",
-                PROBE,
-            ]
+    probe = _validate_probe(
+        _json(
+            _run(
+                [
+                    *prefix,
+                    "run",
+                    "--rm",
+                    "--pull",
+                    "never",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--cap-drop",
+                    "ALL",
+                    "--user",
+                    f"{APP_UID}:{APP_UID}",
+                    "--mount",
+                    f"type=volume,src={volume},dst=/run/codex,readonly",
+                    "--entrypoint",
+                    "/app/.venv/bin/python",
+                    image_id,
+                    "-c",
+                    PROBE,
+                ]
+            )
         )
     )
-    expected_probe = {
-        "root_uid": APP_UID,
-        "root_mode": "0700",
-        "auth_uid": APP_UID,
-        "auth_mode": "0600",
-        "auth_nlink": 1,
-        "inventory": ["auth.json", "log", "tmp"],
-        "log_uid": APP_UID,
-        "log_inventory": ["codex-login.log"],
-        "login_log_uid": APP_UID,
-        "login_log_mode": "0600",
-        "login_log_nlink": 1,
-        "tmp_uid": APP_UID,
-        "tmp_inventory": ["arg0"],
-        "arg0_uid": APP_UID,
-        "arg0_mode": "0700",
-        "arg0_inventory": [],
-    }
-    observed_modes = {key: probe.get(key) for key in ("log_mode", "tmp_mode")}
-    without_observed_modes = {
-        key: value for key, value in probe.items() if key not in observed_modes
-    }
-    if (
-        without_observed_modes != expected_probe
-        or not all(_private_created_directory_mode(value) for value in observed_modes.values())
-    ):
-        raise AttestationError("Codex subscription volume metadata is invalid")
     return {
         "schema_version": SCHEMA_VERSION,
         "volume": volume,
         "generation": generation,
         "image_id": image_id,
-        **expected_probe,
-        **observed_modes,
+        **probe,
     }
 
 
