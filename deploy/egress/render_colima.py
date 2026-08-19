@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -11,50 +14,112 @@ MODEL_HOST = "chatgpt.com"
 AUTH_HOST = "auth.openai.com"
 CODEX_VERSION = "0.147.0"
 SUBNET, APP_IP, POSTGRES_IP = "172.30.47.0/29", "172.30.47.2", "172.30.47.3"
+PROJECT_NAME, NETWORK_NAME = "glupta-crawl", "glupta-crawl_private"
+COMPOSE_SEARCH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+COMPOSE_TIMEOUT_SECONDS = 10
 BEGIN, END = "# GLUPTA_EGRESS_BEGIN", "# GLUPTA_EGRESS_END"
-PROVISIONED = re.compile(
-    rf"(?ms)^provision:\n  {re.escape(BEGIN)} .*?\n  {re.escape(END)}\n"
-)
+PROVISIONED = re.compile(rf"(?ms)^provision:\n  {re.escape(BEGIN)} .*?\n  {re.escape(END)}\n")
 
 
 class RenderError(RuntimeError):
     pass
 
 
-def _validate_contract(repo: Path) -> None:
-    compose = (repo / "compose.yaml").read_text(encoding="utf-8")
-    required = (
-        f"subnet: {SUBNET}",
-        "enable_ipv6: false",
+def _compose_model(repo: Path) -> dict[str, object]:
+    executable = shutil.which("docker-compose", path=COMPOSE_SEARCH_PATH)
+    if executable is None:
+        raise RenderError("Docker Compose semantic validator is unavailable")
+    argv = (
+        str(Path(executable).resolve()),
+        "--ansi",
+        "never",
+        "--env-file",
+        "/dev/null",
+        "--project-directory",
+        str(repo),
+        "-f",
+        str(repo / "compose.yaml"),
+        "config",
+        "--format",
+        "json",
+        "--no-interpolate",
+        "--no-env-resolution",
+        "--no-path-resolution",
     )
-    if any(compose.count(item) != 1 for item in required):
-        raise RenderError("Compose egress identity does not match the reviewed contract")
-    match = re.search(r"(?ms)^services:\n(?P<body>.*?)(?=^[a-z][a-z0-9_-]*:\s*$)", compose)
-    services = [] if match is None else re.findall(
-        r"^  ([a-z][a-z0-9_-]*):\s*$", match.group("body"), re.MULTILINE
-    )
-    if services != ["app", "postgres"]:
-        raise RenderError("Compose steady-state service identity changed")
-    service_starts = list(
-        re.finditer(r"^  ([a-z][a-z0-9_-]*):\s*$", match.group("body"), re.MULTILINE)
-    )
-    service_blocks = {
-        item.group(1): match.group("body")[
-            item.end() : service_starts[index + 1].start()
-            if index + 1 < len(service_starts)
-            else None
-        ]
-        for index, item in enumerate(service_starts)
-    }
-    expected_ips = {"app": APP_IP, "postgres": POSTGRES_IP}
-    for service, expected_ip in expected_ips.items():
-        addresses = re.findall(
-            r"^[ \t]+ipv4_address:[ \t]*(\S+)[ \t]*$",
-            service_blocks[service],
-            re.MULTILINE,
+    completed: subprocess.CompletedProcess[str] | None = None
+    failure: str | None = None
+    try:
+        completed = subprocess.run(  # noqa: S603
+            argv,
+            check=False,
+            cwd=repo,
+            env={
+                "COMPOSE_DISABLE_ENV_FILE": "1",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=COMPOSE_TIMEOUT_SECONDS,
         )
-        if addresses != [expected_ip]:
-            raise RenderError("Compose egress identity does not match the reviewed contract")
+    except subprocess.TimeoutExpired:
+        failure = "Docker Compose semantic validation timed out"
+    except OSError:
+        failure = "Docker Compose semantic validator is unavailable"
+    except UnicodeError:
+        failure = "Docker Compose semantic validation failed"
+    if failure is not None:
+        raise RenderError(failure)
+    if completed is None:
+        raise RenderError("Docker Compose semantic validation failed")
+    if completed.returncode != 0:
+        del completed
+        raise RenderError("Docker Compose semantic validation failed")
+    model: object = None
+    invalid_json = False
+    try:
+        model = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        invalid_json = True
+    del completed
+    if invalid_json:
+        raise RenderError("Docker Compose semantic validation failed")
+    if not isinstance(model, dict):
+        del model
+        raise RenderError("Docker Compose semantic validation failed")
+    return model
+
+
+def _validate_contract(repo: Path) -> None:
+    compose = _compose_model(repo)
+    services = compose.get("services")
+    if not isinstance(services, dict) or set(services) != {"app", "postgres"}:
+        raise RenderError("Compose steady-state service identity changed")
+    expected_network = {
+        "name": NETWORK_NAME,
+        "ipam": {"config": [{"subnet": SUBNET}]},
+        "enable_ipv6": False,
+    }
+    expected_service_networks = {
+        "app": {"private": {"ipv4_address": APP_IP}},
+        "postgres": {"private": {"ipv4_address": POSTGRES_IP}},
+    }
+    networks = compose.get("networks")
+    if (
+        compose.get("name") != PROJECT_NAME
+        or not isinstance(networks, dict)
+        or set(networks) != {"private"}
+        or networks.get("private") != expected_network
+        or any(
+            not isinstance(services[service], dict)
+            or services[service].get("networks") != expected_networks
+            for service, expected_networks in expected_service_networks.items()
+        )
+    ):
+        raise RenderError("Compose egress identity does not match the reviewed contract")
 
     project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = project.get("project", {}).get("dependencies", [])
