@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from pydantic_ai.usage import RequestUsage
 from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import EvaluatorContext
 
@@ -67,7 +66,7 @@ class CrawlEvalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown eval case"):
             load_dataset(path, case_names={"EV-999"})
 
-    def test_synthetic_runner_awaits_inference_through_pydantic_evals(self) -> None:
+    def test_synthetic_runner_consumes_provider_result_through_pydantic_evals(self) -> None:
         inputs = EvalInput(
             question="What is the status?",
             sources=[{"path": "status.md", "content": "Status: paused"}],
@@ -86,9 +85,7 @@ class CrawlEvalTests(unittest.TestCase):
             workflow_id="synthetic-workflow",
             request_digest="a" * 64,
         )
-        inference = AsyncMock(
-            return_value=(ProviderResult(brief=brief, audit=audit), RequestUsage())
-        )
+        inference = AsyncMock(return_value=ProviderResult(brief=brief, audit=audit))
         settings = SimpleNamespace(
             dbos_system_database_url=lambda: "postgresql://local/synthetic",
             require_external_profile=lambda: (release_profile(), Path("/private/codex"), 1),

@@ -147,7 +147,7 @@ def run_eval(
             disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
             external_disclosure_ack=external_disclosure_ack,
         )
-        result, _usage = await _run_inference(
+        result = await _run_inference(
             _CrawlModelPacket(
                 admitted_request=admitted.workflow_payload(),
                 release_profile=profile,
