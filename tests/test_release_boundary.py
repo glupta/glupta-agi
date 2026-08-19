@@ -49,6 +49,13 @@ class ReleaseBoundaryTests(TestCase):
         sources = {path.name: path.read_text(encoding="utf-8") for path in SOURCE.glob("*.py")}
         joined = "\n".join(sources.values())
         self.assertIn("openai-codex==0.147.0", project["project"]["dependencies"])
+        self.assertIn("pydantic>=2.12,<3", project["project"]["dependencies"])
+        self.assertFalse(
+            any(
+                dependency.startswith("pydantic-ai")
+                for dependency in project["project"]["dependencies"]
+            )
+        )
         self.assertEqual(
             [name for name, text in sources.items() if "from openai_codex import" in text],
             ["codex_adapter.py"],
@@ -59,6 +66,7 @@ class ReleaseBoundaryTests(TestCase):
         self.assertNotIn("credential_sha256", joined)
         self.assertNotIn("max_usd", joined)
         self.assertNotIn("evals.py", sources)
+        self.assertNotIn("pydantic_ai", joined)
 
     def test_operator_contract_is_subscription_only_and_dispatch_held(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
