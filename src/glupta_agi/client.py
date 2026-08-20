@@ -90,16 +90,14 @@ def _workflow_id(raw: str | None) -> str:
 
 def _disclosure_payload(question: str, selection: dict[str, object]) -> bytes:
     body = {
-        "question": question, **selection,
-        "disclosure_profile": "external_disclosed_v1",
+        "question": question, **selection, "disclosure_profile": "external_disclosed_v1",
         "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
-        "external_disclosure_ack": True,
-    }
+        "external_disclosure_ack": True}
     return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def _request_payload(question: str, files: Sequence[str], *, ack: bool) -> bytes:
-    if not ack:
+    if ack is not True:
         raise ClientError("external disclosure acknowledgement is required")
     normalized_question = question.strip()
     if not normalized_question or len(normalized_question.encode()) > 32 * 1024:
@@ -107,15 +105,13 @@ def _request_payload(question: str, files: Sequence[str], *, ack: bool) -> bytes
     if not files or len(files) > 20 or len(set(files)) != len(files):
         raise ClientError("select between 1 and 20 unique source files")
     try:
-        for path in files:
-            _validate_relative_path(path)
+        tuple(_validate_relative_path(path) for path in files)
     except IntakeError as exc:
         raise ClientError(str(exc)) from None
     return _disclosure_payload(normalized_question, {"files": list(files)})
 
 
-def _submit_payload(payload: bytes, endpoint: str, token_file: Path,
-                    idempotency_key: str | None,
+def _submit_payload(payload: bytes, endpoint: str, token_file: Path, idempotency_key: str | None,
                     opener: Callable[..., Any] | None) -> dict[str, Any]:
     base_url = _validate_endpoint(endpoint)
     workflow_id = _workflow_id(idempotency_key)
@@ -139,12 +135,9 @@ def _submit_payload(payload: bytes, endpoint: str, token_file: Path,
         raise ClientError(failure) from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise ClientError("server response exceeds the client limit")
-    invalid_response = False
     try:
         result = EvidenceBriefResponse.model_validate_json(body)
     except ValueError:
-        invalid_response = True
-    if invalid_response:
         raise ClientError("server returned an invalid evidence brief") from None
     if result.workflow_id != workflow_id:
         raise ClientError("server returned a mismatched workflow result")
@@ -154,8 +147,18 @@ def _submit_payload(payload: bytes, endpoint: str, token_file: Path,
 def submit(question: str, files: Sequence[str], endpoint: str, token_file: Path,
            idempotency_key: str | None = None, *, external_disclosure_ack: bool = False,
            opener: Callable[..., Any] | None = None) -> dict[str, Any]:
-    payload = _request_payload(question, files, ack=external_disclosure_ack)
-    return _submit_payload(payload, endpoint, token_file, idempotency_key, opener)
+    error = None
+    try:
+        payload = _request_payload(question, files, ack=external_disclosure_ack)
+        result = _submit_payload(payload, endpoint, token_file, idempotency_key, opener)
+    except ClientError as exc:
+        error = str(exc)
+    if error is None:
+        return result
+    question = endpoint = idempotency_key = ""
+    files, token_file, external_disclosure_ack = (), Path(), False
+    opener, payload = None, b""
+    raise ClientError(error) from None
 
 
 def submit_inline(canonical: CanonicalRequest, endpoint: str, token_file: Path,
@@ -190,14 +193,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = submit(
-            args.question,
-            args.files,
-            args.endpoint,
-            args.token_file,
-            args.idempotency_key,
-            external_disclosure_ack=args.ack_external_disclosure,
-        )
+        result = submit(args.question, args.files, args.endpoint, args.token_file,
+                        args.idempotency_key, external_disclosure_ack=args.ack_external_disclosure)
     except ClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

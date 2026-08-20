@@ -58,6 +58,24 @@ def _assert_public_error_sanitized(
 
 
 class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
+    def test_disclosure_acknowledgement_requires_exact_true(self) -> None:
+        common = {
+            "question": "q",
+            "disclosure_profile": "external_disclosed_v1",
+            "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+        }
+        branches = (
+            (EvidenceBriefRequest, {"files": ["source.md"]}),
+            (EvidenceBriefInlineRequest,
+             {"sources": [{"path": "source.md", "content": "approved"}]}),
+        )
+        for model, selection in branches:
+            for acknowledgement in (1, 1.0, False, "true"):
+                with self.subTest(model=model.__name__, acknowledgement=acknowledgement):
+                    with self.assertRaises(ValueError):
+                        model(**common, **selection,
+                              external_disclosure_ack=acknowledgement)
+
     async def test_invalid_union_and_non_utf8_inline_text_are_bounded_before_effects(self) -> None:
         source_marker = "REJECTED_ASGI_SOURCE_MARKER"
         token_marker = "REJECTED_ASGI_TOKEN_MARKER_" + "t" * 32
@@ -83,6 +101,17 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                 },
                 "request text is not valid UTF-8",
             ),
+            *(
+                (
+                {**common, **selection, "external_disclosure_ack": acknowledgement},
+                "request validation failed",
+                )
+                for selection in (
+                    {"files": ["source.md"]},
+                    {"sources": [{"path": "source.md", "content": source_marker}]},
+                )
+                for acknowledgement in (1, 1.0, False, "true")
+            )
         )
         app.dependency_overrides[get_settings] = lambda: Settings(
             input_root=Path("/not-used"), token=token_marker

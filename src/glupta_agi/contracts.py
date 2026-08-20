@@ -5,11 +5,10 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, StrictInt, model_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
 
-DISCLOSURE_NOTICE = (
-    "The selected source bytes and question will be sent to the OpenAI Codex service "
-    "using the approved ChatGPT subscription.")
+DISCLOSURE_NOTICE = ("The selected source bytes and question will be sent to the OpenAI "
+                     "Codex service using the approved ChatGPT subscription.")
 DISCLOSURE_NOTICE_DIGEST = hashlib.sha256(DISCLOSURE_NOTICE.encode()).hexdigest()
 AUDIT_SCHEMA = "crawl-codex-subscription-audit-v1"
 
@@ -19,6 +18,12 @@ class _DisclosureRequest(BaseModel, extra="forbid"):
     disclosure_profile: Literal["external_disclosed_v1"]
     disclosure_notice_digest: str = Field(pattern=f"^{DISCLOSURE_NOTICE_DIGEST}$")
     external_disclosure_ack: Literal[True]
+
+    @field_validator("external_disclosure_ack", mode="before")
+    def require_exact_ack(value: object) -> object:
+        if value is not True:
+            raise ValueError("external disclosure acknowledgement is required")
+        return value
 
 
 class EvidenceBriefRequest(_DisclosureRequest):
@@ -83,8 +88,7 @@ class ProviderAudit(BaseModel, extra="forbid", frozen=True):
 
 def provider_record_digest(brief: EvidenceBrief, audit: ProviderAudit) -> str:
     return canonical_digest({"result": brief.model_dump(mode="json"),
-                             "audit": audit.model_dump(mode="json",
-                                                       exclude={"record_digest"})})
+                             "audit": audit.model_dump(mode="json", exclude={"record_digest"})})
 
 
 class ProviderResult(BaseModel, extra="forbid", frozen=True):
@@ -121,7 +125,7 @@ class EvidenceBriefResponse(EvidenceBrief):
         brief = EvidenceBrief.model_validate(
             self.model_dump(include=set(EvidenceBrief.model_fields)))
         record = validate_provider_record(ProviderResult(brief=brief, audit=self.provider_audit))
-        if (record.audit.workflow_id != self.workflow_id
-                or record.audit.request_digest != self.request_digest):
+        if (record.audit.workflow_id != self.workflow_id or
+                record.audit.request_digest != self.request_digest):
             raise ValueError("provider audit does not match the public result")
         return self

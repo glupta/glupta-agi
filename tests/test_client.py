@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from glupta_agi.client import (
+    MAX_RESPONSE_BYTES,
     ClientError,
     _NoRedirect,
     _validate_endpoint,
@@ -217,18 +218,69 @@ class ClientTests(unittest.TestCase):
     def test_external_disclosure_must_be_explicit_before_capability_read_or_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             token = self._token(Path(temporary))
-            with (
-                patch("glupta_agi.client._read_capability") as capability,
-                self.assertRaisesRegex(ClientError, "acknowledgement"),
-            ):
-                submit(
-                    "q",
-                    ["one.md"],
-                    "http://127.0.0.1:8765",
-                    token,
-                    opener=lambda *_a, **_k: self.fail("network dispatch"),
-                )
-            capability.assert_not_called()
+            for acknowledgement in (1, 1.0, False, "true"):
+                with (
+                    self.subTest(acknowledgement=acknowledgement),
+                    patch("glupta_agi.client._read_capability") as capability,
+                    self.assertRaisesRegex(ClientError, "acknowledgement"),
+                ):
+                    submit(
+                        "q", ["one.md"], "http://127.0.0.1:8765", token,
+                        external_disclosure_ack=acknowledgement,
+                        opener=lambda *_a, **_k: self.fail("network dispatch"),
+                    )
+                capability.assert_not_called()
+
+    def test_legacy_submit_failures_release_request_bearer_and_response_locals(self) -> None:
+        question_marker = "LEGACY_PRIVATE_QUESTION_MARKER"
+        bearer_marker = "LEGACY_PRIVATE_BEARER_" + "b" * 32
+        response_marker = "LEGACY_PRIVATE_RESPONSE_MARKER"
+        workflow_id = "01a01407-fe3e-72aa-9b8f-7666915df735"
+        other_id = "01a01407-fe3e-72aa-9b8f-7666915df736"
+        brief = EvidenceBrief(
+            answer=response_marker, citations=[], uncertainties=[], next_decisions=[]
+        )
+        mismatched = json.dumps({
+            **brief.model_dump(mode="json"),
+            "request_digest": "d" * 64,
+            "workflow_id": other_id,
+            "markdown": response_marker,
+            "provider_audit": provider_audit(
+                brief, workflow_id=other_id, request_digest="d" * 64
+            ).model_dump(mode="json"),
+        }).encode()
+        cases = (
+            (lambda *_a, **_k: (_ for _ in ()).throw(
+                ClientError("server redirect rejected")), "server redirect rejected"),
+            (lambda *_a, **_k: (_ for _ in ()).throw(
+                urllib.error.HTTPError("url", 503, bearer_marker, {}, None)),
+             f"server returned HTTP 503 for workflow {workflow_id}"),
+            (lambda *_a, **_k: _Response(
+                response_marker.encode() * (MAX_RESPONSE_BYTES // len(response_marker) + 1)),
+             "server response exceeds the client limit"),
+            (lambda *_a, **_k: _Response(response_marker.encode()),
+             "server returned an invalid evidence brief"),
+            (lambda *_a, **_k: _Response(mismatched),
+             "server returned a mismatched workflow result"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            token = self._token(Path(temporary), bearer_marker)
+            for opener, message in cases:
+                with self.subTest(message=message):
+                    try:
+                        submit(
+                            question_marker, ["one.md"], "http://127.0.0.1:8765", token,
+                            workflow_id, external_disclosure_ack=True, opener=opener,
+                        )
+                    except ClientError as error:
+                        caught = error
+                    else:
+                        self.fail("expected ClientError")
+                    self.assertEqual(str(caught), message)
+                    _assert_client_trace_sanitized(
+                        self, caught, ["submit"],
+                        question_marker, bearer_marker, response_marker,
+                    )
 
     def test_response_audit_and_requested_workflow_are_cross_bound(self) -> None:
         workflow_id, request_digest = "01a01407-fe3e-72aa-9b8f-7666915df735", "d" * 64
