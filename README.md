@@ -286,9 +286,10 @@ native system-skill tree, whose regular-file bytes it hashes for integrity. It
 does not open any other regular file. It never reads authentication bytes, log
 bytes, installation bytes, or model-cache bytes. `/run/codex` must be owned by
 UID 65532 at mode `0700` and match one of
-two complete official Codex 0.147.0 file-store layouts: completed-login before
-first use, or the exact post-use layout materialized by the native runtime.
-Both layouts contain a regular mode-`0600`, single-link `auth.json`;
+three complete official Codex 0.147.0 file-store layouts: completed-login before
+first use, the exact post-use layout materialized by the native runtime, or the
+post-migration variant described below. All three layouts contain a regular
+mode-`0600`, single-link `auth.json`;
 `log/codex-login.log`, also regular mode `0600` and single-link; and mode-`0700`
 `tmp/arg0`. Direct device login exits through the Codex CLI's
 immediate success path, so its one native arg0-helper directory remains after a
@@ -306,7 +307,11 @@ native Codex 0.147.0 app-server startup in the exact release image and matched
 against the observed post-use volume. It permits only the six bundled system
 skills and marker, requires directories at mode `0755` and regular files at
 mode `0644`, and rejects every symlink there before opening any skill file. Every
-node must be owned by UID 65532 and have the exact native link count; the `log`
+node must be owned by UID 65532 and have the exact native link count. The exact
+post-migration variant differs from the post-use layout only by Codex
+0.147.0's one-shot `.sandbox_migration` marker. The marker must be a regular
+node owned by UID 65532 and GID 65532, at mode `0600`, with one link and size
+three; the attestor checks those fields with `lstat` and never opens it. The `log`
 and `tmp` directories must grant their owner full access and must have no
 special or group/world write bits. The attestor rejects incomplete or mixed
 layouts, zero or multiple arg0 sessions, alternate helper targets, user skills,

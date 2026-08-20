@@ -1,10 +1,15 @@
 # ruff: noqa: S101
 from __future__ import annotations
 
+import io
 import json
+import os
+import stat
 import subprocess
+from contextlib import redirect_stdout
 from copy import deepcopy
 from itertools import pairwise
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -116,6 +121,104 @@ def _post_use_probe() -> dict[str, object]:
     return probe
 
 
+def _native_volume_tree(tmp_path: Path, *, runtime_materialized: bool) -> tuple[Path, Path]:
+    root = tmp_path / "codex"
+    log = root / "log"
+    arg0 = root / "tmp" / "arg0"
+    session = arg0 / SESSION_NAME
+    log.mkdir(parents=True)
+    session.mkdir(parents=True)
+    root.chmod(0o700)
+    log.chmod(0o755)
+    (root / "tmp").chmod(0o755)
+    arg0.chmod(0o700)
+    session.chmod(0o755)
+    for path, content, mode in (
+        (root / "auth.json", b"controlled-auth-bytes", 0o600),
+        (log / "codex-login.log", b"controlled-log-bytes", 0o600),
+        (session / ".lock", b"", 0o644),
+    ):
+        path.write_bytes(content)
+        path.chmod(mode)
+    for helper in attestation.EXPECTED_SESSION_INVENTORY:
+        if helper != ".lock":
+            (session / helper).symlink_to(attestation.CODEX_BINARY_TARGET)
+    migration_marker = root / ".sandbox_migration"
+    migration_marker.write_bytes(b"v1\n")
+    migration_marker.chmod(0o600)
+    if runtime_materialized:
+        for filename in ("installation_id", "models_cache.json"):
+            path = root / filename
+            path.write_bytes(b"controlled-runtime-bytes")
+            path.chmod(0o644)
+        system_skills = root / "skills" / ".system"
+        system_skills.mkdir(parents=True)
+        (root / "skills").chmod(0o755)
+        system_skills.chmod(0o755)
+        system_marker = system_skills / ".codex-system-skills.marker"
+        system_marker.write_bytes(b"controlled-system-skill-bytes")
+        system_marker.chmod(0o644)
+        for skill in attestation.EXPECTED_SYSTEM_INVENTORY:
+            if skill != ".codex-system-skills.marker":
+                path = system_skills / skill
+                path.mkdir()
+                path.chmod(0o755)
+    return root, migration_marker
+
+
+def _execute_post_migration_probe(
+    root: Path,
+    migration_marker: Path,
+    *,
+    invalid_marker_field: str | None = None,
+) -> tuple[dict[str, object] | None, list[Path], int | None]:
+    probe = attestation.PROBE.replace("base = '/run/codex'", f"base = {str(root)!r}", 1)
+    real_lstat = os.lstat
+    real_open = os.open
+    opened: list[Path] = []
+
+    def reviewed_lstat(path: os.PathLike[str] | str) -> os.stat_result:
+        observed = real_lstat(path)
+        values = list(observed)
+        values[4] = attestation.APP_UID
+        values[5] = attestation.APP_GID
+        if stat.S_ISDIR(values[0]):
+            values[3] = 2 + sum(entry.is_dir(follow_symlinks=False) for entry in os.scandir(path))
+        elif stat.S_ISLNK(values[0]):
+            values[0] = stat.S_IFLNK | 0o777
+        if Path(path) == migration_marker:
+            if invalid_marker_field == "type":
+                values[0] = stat.S_IFIFO | stat.S_IMODE(values[0])
+            elif invalid_marker_field == "uid":
+                values[4] = 0
+            elif invalid_marker_field == "gid":
+                values[5] = 0
+            elif invalid_marker_field == "mode":
+                values[0] = stat.S_IFREG | 0o644
+            elif invalid_marker_field == "nlink":
+                values[3] = 2
+            elif invalid_marker_field == "size":
+                values[6] = attestation.MIGRATION_MARKER_SIZE + 1
+        return os.stat_result(values)
+
+    def reviewed_open(path: os.PathLike[str] | str, flags: int, mode: int = 0o777) -> int:
+        opened.append(Path(path))
+        return real_open(path, flags, mode)
+
+    output = io.StringIO()
+    with (
+        patch.object(attestation.os, "lstat", side_effect=reviewed_lstat),
+        patch.object(attestation.os, "open", side_effect=reviewed_open),
+        redirect_stdout(output),
+    ):
+        try:
+            exec(compile(probe, "<volume-probe>", "exec"), {})  # noqa: S102
+        except SystemExit as stopped:
+            assert isinstance(stopped.code, int)
+            return None, opened, stopped.code
+    return json.loads(output.getvalue()), opened, None
+
+
 def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
     volume = {
@@ -171,7 +274,7 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
             "session": "0755",
             "tmp": "0755",
         },
-        "schema_version": "glupta-codex-volume-attestation-v3",
+        "schema_version": "glupta-codex-volume-attestation-v4",
         "volume": VOLUME,
     }
     probe_arguments, _probe_kwargs = calls[2]
@@ -209,9 +312,7 @@ def test_attests_exact_post_use_runtime_metadata() -> None:
         "skills": attestation.EXPECTED_SYSTEM_ROOT_INVENTORY,
         "skills/.system": attestation.EXPECTED_SYSTEM_INVENTORY,
         **{
-            f"skills/.system/{name}": (
-                ["SKILL.md"] if name == "review-agent" else []
-            )
+            f"skills/.system/{name}": (["SKILL.md"] if name == "review-agent" else [])
             for name in attestation.EXPECTED_SYSTEM_INVENTORY
             if name != ".codex-system-skills.marker"
         },
@@ -225,6 +326,76 @@ def test_attests_exact_post_use_runtime_metadata() -> None:
         if name.startswith("skills")
     )
     assert receipt["modes"]["skills/.system/review-agent/SKILL.md"] == "0644"
+
+
+def test_executable_probe_attests_exact_native_post_migration_metadata(tmp_path: Path) -> None:
+    root, migration_marker = _native_volume_tree(tmp_path, runtime_materialized=True)
+    probe, opened, exit_code = _execute_post_migration_probe(root, migration_marker)
+    assert probe is not None
+    assert exit_code is None
+    system_manifest = probe["system_skill_manifest"]
+
+    with patch.object(attestation, "EXPECTED_SYSTEM_SKILL_MANIFEST", system_manifest):
+        receipt = attestation._validate_probe(probe)
+
+    assert receipt["layout"] == "post-migration"
+    assert receipt["inventories"]["root"] == attestation.POST_MIGRATION_ROOT_INVENTORY
+    assert receipt["modes"]["sandbox_migration"] == "0600"
+    assert probe["nodes"]["sandbox_migration"] == {
+        "type": "regular",
+        "uid": attestation.APP_UID,
+        "gid": attestation.APP_GID,
+        "mode": "0600",
+        "nlink": 1,
+        "size": attestation.MIGRATION_MARKER_SIZE,
+    }
+    assert opened == [root / "skills" / ".system" / ".codex-system-skills.marker"]
+    assert migration_marker not in opened
+    assert not {
+        root / "auth.json",
+        root / "log" / "codex-login.log",
+        root / "installation_id",
+        root / "models_cache.json",
+    }.intersection(opened)
+
+
+@pytest.mark.parametrize("invalid_marker_field", ["type", "uid", "gid", "mode", "nlink", "size"])
+def test_executable_probe_rejects_wrong_native_migration_marker_metadata(
+    tmp_path: Path, invalid_marker_field: str
+) -> None:
+    root, migration_marker = _native_volume_tree(tmp_path, runtime_materialized=True)
+    probe, opened, exit_code = _execute_post_migration_probe(
+        root,
+        migration_marker,
+        invalid_marker_field=invalid_marker_field,
+    )
+
+    assert probe is None
+    assert exit_code == 2
+    assert opened == []
+    assert migration_marker not in opened
+    assert not {
+        root / "auth.json",
+        root / "log" / "codex-login.log",
+        root / "installation_id",
+        root / "models_cache.json",
+    }.intersection(opened)
+
+
+def test_executable_probe_rejects_migration_marker_mixed_with_pre_use_root(
+    tmp_path: Path,
+) -> None:
+    root, _migration_marker = _native_volume_tree(tmp_path, runtime_materialized=False)
+    probe = attestation.PROBE.replace("base = '/run/codex'", f"base = {str(root)!r}", 1)
+
+    with (
+        patch.object(attestation.os, "open") as open_file,
+        pytest.raises(SystemExit) as stopped,
+    ):
+        exec(compile(probe, "<volume-probe>", "exec"), {})  # noqa: S102
+
+    assert stopped.value.code == 2
+    open_file.assert_not_called()
 
 
 def test_probe_rejects_top_level_skills_symlink_without_opening_target(tmp_path) -> None:
