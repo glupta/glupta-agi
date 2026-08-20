@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import traceback
 import unittest
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -300,3 +302,132 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
                 enqueue.assert_awaited_once()
                 recorded_status.assert_awaited_once_with(workflow_id)
                 handle.get_result.assert_awaited_once_with()
+
+    async def test_all_post_inline_failures_release_public_sensitive_locals(self) -> None:
+        workflow_id = "01a011ce-66e7-70d0-94ca-d49cd9977083"
+        source_marker = "POST_INLINE_SOURCE_MARKER"
+        token_marker = "POST_INLINE_TOKEN_MARKER_" + "t" * 32
+        result_marker = "POST_INLINE_RESULT_MARKER"
+        cases = (
+            ("payload", 500, "evidence brief unavailable", (0, 0, 0)),
+            ("profile", 500, "evidence brief unavailable", (0, 0, 0)),
+            ("workflow_context", 500, "evidence brief unavailable", (0, 0, 0)),
+            ("enqueue", 500, "evidence brief unavailable", (1, 0, 0)),
+            ("status", 500, "evidence brief unavailable", (1, 1, 0)),
+            ("malformed", 500, "evidence brief unavailable", (1, 1, 0)),
+            ("missing", 503, "workflow input unavailable", (1, 1, 0)),
+            ("mismatch", 409, "Idempotency-Key already binds other input", (1, 1, 0)),
+            ("result", 500, "evidence brief unavailable", (1, 1, 1)),
+            ("response_validation", 500, "evidence brief unavailable", (1, 1, 1)),
+            ("cancelled", None, None, (1, 0, 0)),
+        )
+        for failure, expected_status, detail, expected_calls in cases:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                profile = release_profile()
+                request = EvidenceBriefInlineRequest(
+                    question="What is grounded?",
+                    sources=[{"path": "facts.md", "content": source_marker}],
+                    disclosure_profile="external_disclosed_v1",
+                    disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+                    external_disclosure_ack=True,
+                )
+                canonical = admit_inline_request(
+                    question=request.question,
+                    sources=[source.model_dump() for source in request.sources],
+                    disclosure_profile=request.disclosure_profile,
+                    disclosure_notice_digest=request.disclosure_notice_digest,
+                    external_disclosure_ack=request.external_disclosure_ack,
+                )
+                settings = Settings(
+                    input_root=root,
+                    token=token_marker,
+                    release_profile=profile,
+                    release_profile_digest=profile.digest(),
+                    codex_home=codex_home(root),
+                    auth_generation=profile.auth_generation,
+                )
+                handle = SimpleNamespace(
+                    get_result=AsyncMock(side_effect=RuntimeError(result_marker))
+                )
+                enqueue = AsyncMock(return_value=handle)
+                recorded_status = AsyncMock(
+                    return_value=SimpleNamespace(input={"args": [canonical.workflow_payload()]})
+                )
+
+                class WorkflowContext:
+                    def __init__(self, _workflow_id: str) -> None:
+                        pass
+
+                    def __enter__(self, current_failure: str = failure) -> None:
+                        if current_failure == "workflow_context":
+                            raise RuntimeError(result_marker)
+
+                    def __exit__(self, *_args: object) -> bool:
+                        return False
+
+                if failure == "profile":
+                    settings = Settings(input_root=root, token=token_marker)
+                elif failure == "enqueue":
+                    enqueue.side_effect = HTTPException(418, result_marker)
+                elif failure == "status":
+                    recorded_status.side_effect = RuntimeError(result_marker)
+                elif failure == "malformed":
+                    recorded_status.return_value = SimpleNamespace(input={"wrong": True})
+                elif failure == "missing":
+                    recorded_status.return_value = None
+                elif failure == "mismatch":
+                    mismatched = canonical.workflow_payload()
+                    mismatched["question"] = "different question"
+                    recorded_status.return_value = SimpleNamespace(input={"args": [mismatched]})
+                elif failure == "response_validation":
+                    handle.get_result.side_effect = None
+                    handle.get_result.return_value = {"answer": result_marker}
+                elif failure == "cancelled":
+                    enqueue.side_effect = asyncio.CancelledError()
+                payload_failure = (
+                    patch(
+                        "glupta_agi.intake.CanonicalRequest.workflow_payload",
+                        side_effect=RuntimeError(result_marker),
+                    )
+                    if failure == "payload"
+                    else nullcontext()
+                )
+
+                with (
+                    patch("glupta_agi.api.SetWorkflowID", new=WorkflowContext),
+                    patch("glupta_agi.api.crawl_observe_queue.enqueue_async", new=enqueue),
+                    patch(
+                        "glupta_agi.api.DBOS.get_workflow_status_async", new=recorded_status
+                    ),
+                    payload_failure,
+                ):
+                    try:
+                        await evidence_brief(
+                            request=request,
+                            authorization=f"Bearer {token_marker}",
+                            idempotency_key=workflow_id,
+                            settings=settings,
+                        )
+                    except BaseException as exc:
+                        caught = exc
+                    else:
+                        self.fail("post-inline failure reached a successful HTTP response")
+
+                if expected_status is None:
+                    self.assertIsInstance(caught, asyncio.CancelledError)
+                else:
+                    self.assertIsInstance(caught, HTTPException)
+                    self.assertEqual(caught.status_code, expected_status)
+                    self.assertEqual(caught.detail, detail)
+                _assert_public_error_sanitized(
+                    self, caught, source_marker, token_marker, result_marker
+                )
+                self.assertEqual(
+                    (
+                        enqueue.await_count,
+                        recorded_status.await_count,
+                        handle.get_result.await_count,
+                    ),
+                    expected_calls,
+                )
