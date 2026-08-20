@@ -13,7 +13,9 @@ import sys
 from typing import Any
 
 APP_UID = 65532
-SCHEMA_VERSION = "glupta-codex-volume-attestation-v3"
+APP_GID = 65532
+MIGRATION_MARKER_SIZE = 3
+SCHEMA_VERSION = "glupta-codex-volume-attestation-v4"
 IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VOLUME_PATTERN = re.compile(r"glupta-codex-subscription-g([1-9][0-9]*)-[0-9a-f]{32}\Z")
 EXPECTED_LABELS = {
@@ -38,6 +40,7 @@ POST_USE_ROOT_INVENTORY = [
     "skills",
     "tmp",
 ]
+POST_MIGRATION_ROOT_INVENTORY = [".sandbox_migration", *POST_USE_ROOT_INVENTORY]
 EXPECTED_SYSTEM_ROOT_INVENTORY = [".system"]
 EXPECTED_SYSTEM_INVENTORY = [
     ".codex-system-skills.marker",
@@ -56,11 +59,16 @@ EXPECTED_SYSTEM_SKILL_MANIFEST = "cd34b112152e00ddbdfe5e86d99564dc2cfd50947dca66
 _PROBE_TEMPLATE = """import hashlib, json, os, re, stat
 base = '/run/codex'
 names = sorted(os.listdir(base))
+app_uid = __APP_UID__
+app_gid = __APP_GID__
+migration_marker_size = __MIGRATION_MARKER_SIZE__
 pre_use_root = __PRE_USE_ROOT__
 post_use_root = __POST_USE_ROOT__
-if names not in (pre_use_root, post_use_root):
+post_migration_root = __POST_MIGRATION_ROOT__
+if names not in (pre_use_root, post_use_root, post_migration_root):
     raise SystemExit(2)
-post_use = names == post_use_root
+runtime_materialized = names in (post_use_root, post_migration_root)
+post_migration = names == post_migration_root
 paths = {
     'root': base,
     'auth': base + '/auth.json',
@@ -69,21 +77,34 @@ paths = {
     'tmp': base + '/tmp',
     'arg0': base + '/tmp/arg0',
 }
-if post_use:
+if runtime_materialized:
     paths.update({
         'installation_id': base + '/installation_id',
         'models_cache': base + '/models_cache.json',
     })
+if post_migration:
+    paths['sandbox_migration'] = base + '/.sandbox_migration'
 stats = {name: os.lstat(path) for name, path in paths.items()}
 if not all(stat.S_ISDIR(stats[name].st_mode) for name in ('root', 'log', 'tmp', 'arg0')):
     raise SystemExit(2)
+if post_migration:
+    migration_marker = stats['sandbox_migration']
+    if not all((
+        stat.S_ISREG(migration_marker.st_mode),
+        migration_marker.st_uid == app_uid,
+        migration_marker.st_gid == app_gid,
+        stat.S_IMODE(migration_marker.st_mode) == 0o600,
+        migration_marker.st_nlink == 1,
+        migration_marker.st_size == migration_marker_size,
+    )):
+        raise SystemExit(2)
 inventories = {
     'root': names,
     'log': sorted(os.listdir(paths['log'])),
     'tmp': sorted(os.listdir(paths['tmp'])),
     'arg0': sorted(os.listdir(paths['arg0'])),
 }
-if post_use:
+if runtime_materialized:
     skill_root = base + '/skills'
     if not stat.S_ISDIR(os.lstat(skill_root).st_mode):
         raise SystemExit(2)
@@ -146,7 +167,7 @@ helper_names = {
 }
 for key, filename in helper_names.items():
     stats[key] = os.lstat(session_path + '/' + filename)
-def node(value, path):
+def node(value, path, include_size_and_gid=False):
     if stat.S_ISDIR(value.st_mode):
         kind = 'directory'
     elif stat.S_ISREG(value.st_mode):
@@ -159,6 +180,9 @@ def node(value, path):
         'type': kind, 'uid': value.st_uid,
         'mode': format(stat.S_IMODE(value.st_mode), '04o'), 'nlink': value.st_nlink,
     }
+    if include_size_and_gid:
+        result['gid'] = value.st_gid
+        result['size'] = value.st_size
     if kind == 'symlink':
         result['target'] = os.readlink(path)
     return result
@@ -167,13 +191,20 @@ node_paths.update({key: session_path + '/' + filename for key, filename in helpe
 print(json.dumps({
     'session_name': session_name,
     'inventories': inventories,
-    'nodes': {name: node(value, node_paths[name]) for name, value in stats.items()},
-    'system_skill_manifest': manifest.hexdigest() if post_use else None,
+    'nodes': {
+        name: node(value, node_paths[name], name == 'sandbox_migration')
+        for name, value in stats.items()
+    },
+    'system_skill_manifest': manifest.hexdigest() if runtime_materialized else None,
 }, sort_keys=True))
 """
 PROBE = (
-    _PROBE_TEMPLATE.replace("__PRE_USE_ROOT__", repr(PRE_USE_ROOT_INVENTORY))
+    _PROBE_TEMPLATE.replace("__APP_UID__", repr(APP_UID))
+    .replace("__APP_GID__", repr(APP_GID))
+    .replace("__MIGRATION_MARKER_SIZE__", repr(MIGRATION_MARKER_SIZE))
+    .replace("__PRE_USE_ROOT__", repr(PRE_USE_ROOT_INVENTORY))
     .replace("__POST_USE_ROOT__", repr(POST_USE_ROOT_INVENTORY))
+    .replace("__POST_MIGRATION_ROOT__", repr(POST_MIGRATION_ROOT_INVENTORY))
 )
 
 
@@ -268,6 +299,27 @@ def _node(
     )
 
 
+def _migration_marker_node(nodes: object) -> bool:
+    if not isinstance(nodes, dict) or not isinstance(nodes.get("sandbox_migration"), dict):
+        return False
+    value = nodes["sandbox_migration"]
+    return all(
+        (
+            set(value) == {"type", "uid", "gid", "mode", "nlink", "size"},
+            value.get("type") == "regular",
+            type(value.get("uid")) is int,
+            value.get("uid") == APP_UID,
+            type(value.get("gid")) is int,
+            value.get("gid") == APP_GID,
+            value.get("mode") == "0600",
+            type(value.get("nlink")) is int,
+            value.get("nlink") == 1,
+            type(value.get("size")) is int,
+            value.get("size") == MIGRATION_MARKER_SIZE,
+        )
+    )
+
+
 def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
     session_name = probe.get("session_name")
     inventories = probe.get("inventories")
@@ -285,8 +337,12 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
         root_nlink = 4
         skill_directories: set[str] = set()
         skill_files: set[str] = set()
-    elif isinstance(inventories, dict) and inventories.get("root") == POST_USE_ROOT_INVENTORY:
-        layout = "post-use"
+    elif isinstance(inventories, dict) and inventories.get("root") in (
+        POST_USE_ROOT_INVENTORY,
+        POST_MIGRATION_ROOT_INVENTORY,
+    ):
+        post_migration = inventories.get("root") == POST_MIGRATION_ROOT_INVENTORY
+        layout = "post-migration" if post_migration else "post-use"
         root_nlink = 5
         skill_inventories = {
             name: inventory for name, inventory in inventories.items() if name.startswith("skills")
@@ -330,7 +386,7 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
         if not valid_skill_tree:
             raise AttestationError("Codex subscription volume metadata is invalid")
         expected_inventories = {
-            "root": POST_USE_ROOT_INVENTORY,
+            "root": POST_MIGRATION_ROOT_INVENTORY if post_migration else POST_USE_ROOT_INVENTORY,
             **common_inventories,
             **skill_inventories,
         }
@@ -353,7 +409,8 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
         "lock",
         *aliases,
     }
-    if layout == "post-use":
+    runtime_materialized = layout in {"post-use", "post-migration"}
+    if runtime_materialized:
         node_names.update(
             {
                 "installation_id",
@@ -362,10 +419,12 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
                 *skill_files,
             }
         )
+    if layout == "post-migration":
+        node_names.add("sandbox_migration")
     valid = all(
         (
             set(probe) == {"session_name", "inventories", "nodes", "system_skill_manifest"},
-            (layout == "post-use") == isinstance(system_skill_manifest, str),
+            runtime_materialized == isinstance(system_skill_manifest, str),
             isinstance(session_name, str),
             isinstance(session_name, str) and SESSION_PATTERN.fullmatch(session_name) is not None,
             inventories == expected_inventories,
@@ -389,7 +448,7 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
                 )
                 for name in aliases
             ),
-            layout != "post-use"
+            not runtime_materialized
             or all(
                 (
                     _node(nodes, "installation_id", kind="regular", mode="0644", nlink=1),
@@ -414,6 +473,7 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
                     ),
                 )
             ),
+            layout != "post-migration" or _migration_marker_node(nodes),
         )
     )
     if not valid:
@@ -423,7 +483,7 @@ def _validate_probe(probe: dict[str, Any]) -> dict[str, Any]:
         "inventories": expected_inventories,
         "modes": {name: nodes[name]["mode"] for name in sorted(node_names)},
     }
-    if layout == "post-use":
+    if runtime_materialized:
         result["system_skill_manifest"] = system_skill_manifest
     return result
 
@@ -458,7 +518,7 @@ def _attest(docker: str, volume: str, generation: int, image_id: str) -> dict[st
                     "--cap-drop",
                     "ALL",
                     "--user",
-                    f"{APP_UID}:{APP_UID}",
+                    f"{APP_UID}:{APP_GID}",
                     "--mount",
                     f"type=volume,src={volume},dst=/run/codex,readonly",
                     "--entrypoint",
