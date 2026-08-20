@@ -48,9 +48,10 @@ Since 0.4.3, the material incident ledger is:
   inline UTF-8 failures only after the source-bearing probe returns. ASGI and
   direct capture-locals regressions prove no enqueue, provider call, marker, or
   exception chain; invalid input remains terminal and retry-free.
-- **Setup/build failure:** a fresh worktree invoked a host `pytest` before dev
-  extras were installed. `uv sync --frozen --all-extras` restored the locked
-  test environment; frozen/offline lock and package checks remain release gates.
+- **Setup/build failure:** a fresh worktree invoked a host `pytest` because the
+  test tools were declared as an opt-in extra. They now live in uv's default
+  `dev` dependency group, so `uv run --locked pytest` resolves the locked
+  project executable; frozen/offline lock and package checks remain release gates.
 - **Runtime and rollout relevance:** no service, store, dependency, container,
   database, deployment, restart, rollback, effect, budget, or retry behavior
   changed. Deployment, restart, rollback, provider dispatch, task drain, and the
@@ -107,7 +108,7 @@ generator used by DBOS. It runs sequentially, prints a report, and saves a
 machine-readable receipt outside git.
 
 ```sh
-uv run --frozen --extra dev python -m evals.runner \
+uv run --frozen python -m evals.runner \
   --output runtime/evals/latest.json
 ```
 
@@ -117,8 +118,8 @@ model dispatch and remains independently gated.
 ## Developer checks
 
 ```sh
-uv run --frozen --extra dev ruff check .
-uv run --frozen --extra dev python -m pytest -q
+uv run --frozen ruff check .
+uv run --frozen python -m pytest -q
 uv lock --check --offline
 ```
 
@@ -126,7 +127,7 @@ The built-image contract is opt-in and never authenticates or starts a turn:
 
 ```sh
 GLUPTA_RUNTIME_IMAGE=<local-built-image> \
-  uv run --frozen --extra dev python -m pytest -q tests/test_runtime_image.py
+  uv run --frozen python -m pytest -q tests/test_runtime_image.py
 ```
 
 ## Held deployment contract

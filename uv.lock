@@ -123,7 +123,7 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "pydantic-evals" },
     { name = "pytest" },
@@ -137,13 +137,16 @@ requires-dist = [
     { name = "openai-codex", specifier = "==0.147.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3,<4" },
     { name = "pydantic", specifier = ">=2.12,<3" },
-    { name = "pydantic-evals", marker = "extra == 'dev'", specifier = "==2.31.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9,<10" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<1" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "uvicorn", specifier = ">=0.41,<1" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pydantic-evals", specifier = "==2.31.0" },
+    { name = "pytest", specifier = ">=9,<10" },
+    { name = "ruff", specifier = ">=0.15,<1" },
+]
 
 [[package]]
 name = "greenlet"
