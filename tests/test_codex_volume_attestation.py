@@ -37,6 +37,7 @@ def _probe() -> dict[str, object]:
 
     return {
         "session_name": SESSION_NAME,
+        "system_skill_manifest": None,
         "inventories": {
             "root": ["auth.json", "log", "tmp"],
             "log": ["codex-login.log"],
@@ -45,13 +46,13 @@ def _probe() -> dict[str, object]:
             "session": attestation.EXPECTED_SESSION_INVENTORY,
         },
         "nodes": {
-            "root": node("directory", "0700"),
+            "root": node("directory", "0700", nlink=4),
             "auth": node("regular", "0600", nlink=1),
-            "log": node("directory", "0755"),
+            "log": node("directory", "0755", nlink=2),
             "login_log": node("regular", "0600", nlink=1),
-            "tmp": node("directory", "0755"),
-            "arg0": node("directory", "0700"),
-            "session": node("directory", "0755"),
+            "tmp": node("directory", "0755", nlink=3),
+            "arg0": node("directory", "0700", nlink=3),
+            "session": node("directory", "0755", nlink=2),
             "lock": node("regular", "0644", nlink=1),
             "apply_patch": node("symlink", "0777", nlink=1, target=attestation.CODEX_BINARY_TARGET),
             "applypatch": node("symlink", "0777", nlink=1, target=attestation.CODEX_BINARY_TARGET),
@@ -63,6 +64,56 @@ def _probe() -> dict[str, object]:
             ),
         },
     }
+
+
+def _post_use_probe() -> dict[str, object]:
+    probe = _probe()
+    inventories = probe["inventories"]
+    nodes = probe["nodes"]
+    assert isinstance(inventories, dict)
+    assert isinstance(nodes, dict)
+    inventories["root"] = attestation.POST_USE_ROOT_INVENTORY
+    inventories["skills"] = attestation.EXPECTED_SYSTEM_ROOT_INVENTORY
+    inventories["skills/.system"] = attestation.EXPECTED_SYSTEM_INVENTORY
+    for name in attestation.EXPECTED_SYSTEM_INVENTORY:
+        if name != ".codex-system-skills.marker":
+            inventories[f"skills/.system/{name}"] = []
+    inventories["skills/.system/review-agent"] = ["SKILL.md"]
+    probe["system_skill_manifest"] = attestation.EXPECTED_SYSTEM_SKILL_MANIFEST
+    nodes["root"]["nlink"] = 5
+    nodes["installation_id"] = {
+        "type": "regular",
+        "uid": 65532,
+        "mode": "0644",
+        "nlink": 1,
+    }
+    nodes["models_cache"] = {
+        "type": "regular",
+        "uid": 65532,
+        "mode": "0644",
+        "nlink": 1,
+    }
+    skill_directories = {name for name in inventories if name.startswith("skills")}
+    for name in skill_directories:
+        inventory = inventories[name]
+        child_directories = sum(f"{name}/{child}" in skill_directories for child in inventory)
+        nodes[name] = {
+            "type": "directory",
+            "uid": 65532,
+            "mode": "0755",
+            "nlink": 2 + child_directories,
+        }
+    for name in (
+        "skills/.system/.codex-system-skills.marker",
+        "skills/.system/review-agent/SKILL.md",
+    ):
+        nodes[name] = {
+            "type": "regular",
+            "uid": 65532,
+            "mode": "0644",
+            "nlink": 1,
+        }
+    return probe
 
 
 def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
@@ -98,6 +149,7 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
     assert receipt == {
         "generation": 7,
         "image_id": IMAGE_ID,
+        "layout": "completed-login",
         "inventories": {
             "arg0": [SESSION_NAME],
             "log": ["codex-login.log"],
@@ -119,7 +171,7 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
             "session": "0755",
             "tmp": "0755",
         },
-        "schema_version": "glupta-codex-volume-attestation-v2",
+        "schema_version": "glupta-codex-volume-attestation-v3",
         "volume": VOLUME,
     }
     probe_arguments, _probe_kwargs = calls[2]
@@ -133,11 +185,69 @@ def test_attests_exact_labeled_volume_with_metadata_only_probe(capsys) -> None:
     assert "os.lstat" in attestation.PROBE
     assert "os.listdir" in attestation.PROBE
     assert "os.readlink" in attestation.PROBE
-    assert "open(" not in attestation.PROBE
+    assert "open(path, 'rb')" not in attestation.PROBE
+    assert "os.open(path, os.O_RDONLY | os.O_NOFOLLOW)" in attestation.PROBE
+    assert "os.fstat(descriptor)" in attestation.PROBE
+    assert "os.fdopen(descriptor, 'rb')" in attestation.PROBE
+    assert "open(paths[" not in attestation.PROBE
     assert all(
         kwargs["env"] == {"HOME": "/reviewed/home", "PATH": attestation.os.defpath}
         for _, kwargs in calls
     )
+
+
+def test_attests_exact_post_use_runtime_metadata() -> None:
+    receipt = attestation._validate_probe(_post_use_probe())
+
+    assert receipt["layout"] == "post-use"
+    assert receipt["inventories"] == {
+        "root": attestation.POST_USE_ROOT_INVENTORY,
+        "log": ["codex-login.log"],
+        "tmp": ["arg0"],
+        "arg0": [SESSION_NAME],
+        "session": attestation.EXPECTED_SESSION_INVENTORY,
+        "skills": attestation.EXPECTED_SYSTEM_ROOT_INVENTORY,
+        "skills/.system": attestation.EXPECTED_SYSTEM_INVENTORY,
+        **{
+            f"skills/.system/{name}": (
+                ["SKILL.md"] if name == "review-agent" else []
+            )
+            for name in attestation.EXPECTED_SYSTEM_INVENTORY
+            if name != ".codex-system-skills.marker"
+        },
+    }
+    assert receipt["system_skill_manifest"] == attestation.EXPECTED_SYSTEM_SKILL_MANIFEST
+    assert receipt["modes"]["installation_id"] == "0644"
+    assert receipt["modes"]["models_cache"] == "0644"
+    assert all(
+        receipt["modes"][name] == "0755"
+        for name in receipt["inventories"]
+        if name.startswith("skills")
+    )
+    assert receipt["modes"]["skills/.system/review-agent/SKILL.md"] == "0644"
+
+
+def test_probe_rejects_top_level_skills_symlink_without_opening_target(tmp_path) -> None:
+    root = tmp_path / "codex"
+    log = root / "log"
+    arg0 = root / "tmp" / "arg0"
+    log.mkdir(parents=True)
+    arg0.mkdir(parents=True)
+    (root / "auth.json").touch()
+    (root / "installation_id").touch()
+    (root / "models_cache.json").touch()
+    (log / "codex-login.log").write_text("controlled-target-marker", encoding="utf-8")
+    (root / "skills").symlink_to(log, target_is_directory=True)
+    probe = attestation.PROBE.replace("base = '/run/codex'", f"base = {str(root)!r}", 1)
+
+    with (
+        patch.object(attestation.os, "open") as open_file,
+        pytest.raises(SystemExit) as stopped,
+    ):
+        exec(compile(probe, "<volume-probe>", "exec"), {})  # noqa: S102
+
+    assert stopped.value.code == 2
+    open_file.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -246,6 +356,52 @@ def test_rejects_incomplete_extra_or_unsafe_native_layout(case: str) -> None:
         pytest.raises(attestation.AttestationError, match="metadata is invalid"),
     ):
         attestation._attest("/reviewed/bin/docker", VOLUME, 7, IMAGE_ID)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "partial_root",
+        "missing_runtime_node",
+        "extra_system_skill",
+        "extra_nested_file",
+        "wrong_skill_manifest",
+        "skill_symlink",
+        "wrong_skill_directory_nlink",
+        "wrong_skill_file_nlink",
+    ],
+)
+def test_rejects_partial_mixed_or_extra_post_use_layout(case: str) -> None:
+    probe = _post_use_probe()
+    inventories = probe["inventories"]
+    nodes = probe["nodes"]
+    assert isinstance(inventories, dict)
+    assert isinstance(nodes, dict)
+    if case == "partial_root":
+        inventories["root"] = ["auth.json", "installation_id", "log", "tmp"]
+    elif case == "missing_runtime_node":
+        nodes.pop("installation_id")
+    elif case == "extra_system_skill":
+        inventories["skills/.system"].append("unapproved")
+    elif case == "extra_nested_file":
+        inventories["skills/.system/review-agent"].append("config.toml")
+    elif case == "wrong_skill_manifest":
+        probe["system_skill_manifest"] = "0" * 64
+    elif case == "skill_symlink":
+        nodes["skills/.system/review-agent/SKILL.md"] = {
+            "type": "symlink",
+            "uid": 65532,
+            "mode": "0777",
+            "nlink": 1,
+            "target": "/unapproved",
+        }
+    elif case == "wrong_skill_directory_nlink":
+        nodes["skills/.system/review-agent"]["nlink"] = 4
+    else:
+        nodes["skills/.system/review-agent/SKILL.md"]["nlink"] = 2
+
+    with pytest.raises(attestation.AttestationError, match="metadata is invalid"):
+        attestation._validate_probe(probe)
 
 
 def test_probe_failure_covers_wrong_type_or_symlink_without_exposing_metadata(capsys) -> None:

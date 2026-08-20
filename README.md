@@ -225,24 +225,45 @@ The volume must carry `com.glupta.private=true`,
 `com.glupta.purpose=codex-subscription`, and the matching
 `com.glupta.generation` label. The attestor runs the exact image with no network,
 a read-only root, no capabilities, and the volume mounted read-only. It reads
-only filesystem metadata and exact filename inventories. `/run/codex` must be
-owned by UID 65532 at mode `0700` and contain exactly the official completed
-Codex 0.147.0 file-store login layout: a regular mode-`0600`, single-link
-`auth.json`; `log/codex-login.log`, also regular mode `0600` and single-link;
-and mode-`0700` `tmp/arg0`. Direct device login exits through the Codex CLI's
+only filesystem metadata and exact filename inventories outside the non-secret
+native system-skill tree, whose regular-file bytes it hashes for integrity. It
+does not open any other regular file. It never reads authentication bytes, log
+bytes, installation bytes, or model-cache bytes. `/run/codex` must be owned by
+UID 65532 at mode `0700` and match one of
+two complete official Codex 0.147.0 file-store layouts: completed-login before
+first use, or the exact post-use layout materialized by the native runtime.
+Both layouts contain a regular mode-`0600`, single-link `auth.json`;
+`log/codex-login.log`, also regular mode `0600` and single-link; and mode-`0700`
+`tmp/arg0`. Direct device login exits through the Codex CLI's
 immediate success path, so its one native arg0-helper directory remains after a
 normal exit. The directory name must match `codex-arg0[A-Za-z0-9]{6}`, be mode
 `0755`, and contain exactly a regular mode-`0644`, single-link `.lock` plus the
 four single-link symlinks `apply_patch`, `applypatch`, `codex-execve-wrapper`,
 and `codex-linux-sandbox`. Each symlink must target the exact bundled
 `/app/.venv/lib/python3.14/site-packages/codex_cli_bin/bin/codex` executable.
-Every node must be owned by UID 65532; the `log` and `tmp` directories must
-grant their owner full access and must have no special or group/world write
-bits. The attestor rejects incomplete pre-authentication state, zero or
-multiple arg0 sessions, alternate symlink targets, and any missing or
-additional configuration or state. It records inventories and modes only and
-does not prove the account/plan. It never reads authentication bytes or log
-bytes.
+After first native use, the root additionally contains only single-link,
+mode-`0644` regular files `installation_id` and `models_cache.json`, plus the
+mode-`0755` `skills/.system` tree installed by the pinned runtime. The attestor
+binds every relative path, directory inventory, and regular-file SHA-256 in
+that tree to a manifest independently reproduced by a networkless, no-auth
+native Codex 0.147.0 app-server startup in the exact release image and matched
+against the observed post-use volume. It permits only the six bundled system
+skills and marker, requires directories at mode `0755` and regular files at
+mode `0644`, and rejects every symlink there before opening any skill file. Every
+node must be owned by UID 65532 and have the exact native link count; the `log`
+and `tmp` directories must grant their owner full access and must have no
+special or group/world write bits. The attestor rejects incomplete or mixed
+layouts, zero or multiple arg0 sessions, alternate helper targets, user skills,
+and any missing or additional configuration, hook, MCP, or state entry. Its
+receipt records inventories, modes, and the non-secret system-skill manifest;
+it does not prove the account/plan.
+
+Build-versus-adopt: Codex owns native system-skill materialization but 0.147.0
+does not expose a supported offline integrity receipt for the persisted tree;
+Docker supplies isolation but not that product-specific admission decision.
+The bounded attestor composes the exact official image, Docker's read-only
+probe, and Python's standard SHA-256 implementation. It adds no service or
+dependency and owns only the missing label, layout, and content-binding policy.
 Account identity, live route egress, and official-login rotation remain
 independent deployment gates.
 The receipt is point-in-time metadata evidence: re-run it against the same
