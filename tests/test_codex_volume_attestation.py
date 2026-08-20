@@ -227,6 +227,29 @@ def test_attests_exact_post_use_runtime_metadata() -> None:
     assert receipt["modes"]["skills/.system/review-agent/SKILL.md"] == "0644"
 
 
+def test_probe_rejects_top_level_skills_symlink_without_opening_target(tmp_path) -> None:
+    root = tmp_path / "codex"
+    log = root / "log"
+    arg0 = root / "tmp" / "arg0"
+    log.mkdir(parents=True)
+    arg0.mkdir(parents=True)
+    (root / "auth.json").touch()
+    (root / "installation_id").touch()
+    (root / "models_cache.json").touch()
+    (log / "codex-login.log").write_text("controlled-target-marker", encoding="utf-8")
+    (root / "skills").symlink_to(log, target_is_directory=True)
+    probe = attestation.PROBE.replace("base = '/run/codex'", f"base = {str(root)!r}", 1)
+
+    with (
+        patch.object(attestation.os, "open") as open_file,
+        pytest.raises(SystemExit) as stopped,
+    ):
+        exec(compile(probe, "<volume-probe>", "exec"), {})  # noqa: S102
+
+    assert stopped.value.code == 2
+    open_file.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

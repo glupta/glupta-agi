@@ -85,6 +85,8 @@ inventories = {
 }
 if post_use:
     skill_root = base + '/skills'
+    if not stat.S_ISDIR(os.lstat(skill_root).st_mode):
+        raise SystemExit(2)
     manifest = hashlib.sha256()
     for current, directories, files in os.walk(skill_root, followlinks=False):
         directories.sort()
