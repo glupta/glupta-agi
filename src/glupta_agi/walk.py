@@ -4,7 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StrictInt, TypeAdapter, model_validator
+from pydantic import BaseModel, Field, StrictInt, StringConstraints, TypeAdapter, model_validator
 
 from .contracts import DISCLOSURE_NOTICE_DIGEST, Citation, ProviderAudit, canonical_digest
 from .intake import (
@@ -20,6 +20,9 @@ WalkFamily = Literal[
 ]
 DeliverableType = Literal[
     "decision_memo", "specification", "experiment_design", "diligence_packet"
+]
+DecisionOwner = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256, strict=True)
 ]
 WALK_FAMILIES = (
     "walk_state_synthesis_v1", "walk_deliverable_v1", "walk_evidence_review_v1"
@@ -40,7 +43,7 @@ class WalkArtifact(BaseModel, extra="forbid", strict=True):
     schema_version: Literal["glupta-walk-request-artifact-v1"]
     workflow_family: WalkFamily
     question: str = Field(min_length=1, max_length=32_768)
-    decision_owner: str = Field(min_length=1, max_length=256)
+    decision_owner: DecisionOwner
     deliverable_type: DeliverableType | None = None
     expected_disposition: Literal["PASS", "HOLD"] | None = None
     disclosure_profile: Literal["external_disclosed_v1"]
@@ -75,7 +78,7 @@ class WalkRequest(BaseModel, extra="forbid", frozen=True, arbitrary_types_allowe
     canonical: CanonicalRequest
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     workflow_family: WalkFamily
-    decision_owner: str = Field(min_length=1, max_length=256)
+    decision_owner: DecisionOwner
     deliverable_type: DeliverableType | None
     expected_disposition: Literal["PASS", "HOLD"] | None
     release_profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -176,7 +179,7 @@ class WalkStateSynthesis(_WalkOutput):
 class WalkDeliverable(_WalkOutput):
     kind: Literal["walk_deliverable_v1"]
     deliverable_type: DeliverableType
-    decision_owner: str
+    decision_owner: DecisionOwner
     objective: str
     non_goals: list[str]
     proposed_artifact: str
@@ -323,10 +326,10 @@ JSON schema. summary_markdown is a draft rendering, not approval or executed act
 blockers must name their owner and evidence; uncertainties must name the evidence needed.
 Deliverables must preserve the named owner and type. For any proposed component or control,
 alternatives must compare official/native and relevant maintained open-source options with an
-adopt, borrow, or reject rationale. Evidence-review verdict must match the frozen disposition."""
+adopt, borrow, or reject rationale. Evidence reviews must judge the frozen criteria and admitted
+evidence independently."""
     metadata = {"workflow_family": request.workflow_family,
         "decision_owner": request.decision_owner, "deliverable_type": request.deliverable_type,
-        "expected_disposition": request.expected_disposition,
         "result_schema_digest": canonical_digest(schema.model_json_schema())}
     blocks = ["WALK REQUEST\n" + json.dumps(metadata, sort_keys=True),
         f"QUESTION\n{request.canonical.question}"]

@@ -37,6 +37,7 @@ from glupta_agi.walk import (
     validate_citations,
     validate_output_identity,
     validate_walk_payload,
+    walk_prompt,
 )
 from glupta_agi.workflow import (
     BriefGenerationError,
@@ -71,8 +72,8 @@ def artifact(family: str = "walk_state_synthesis_v1", **changes: object) -> Walk
     return WalkArtifact.model_validate(values)
 
 
-def admitted(family: str = "walk_state_synthesis_v1"):
-    item = artifact(family)
+def admitted(family: str = "walk_state_synthesis_v1", **changes: object):
+    item = artifact(family, **changes)
     raw = json.dumps(item.model_dump(mode="json"), separators=(",", ":"),
         sort_keys=True).encode()
     return item.admit(hashlib.sha256(raw).hexdigest())
@@ -182,6 +183,44 @@ def test_family_outputs_bind_request_identity_and_word_limits() -> None:
         WalkStateSynthesis(kind="walk_state_synthesis_v1", current_facts=[], blockers=[],
             uncertainties=[], prioritized_next_actions=[], citations=[],
             summary_markdown="word " * 901)
+
+
+def test_decision_owner_is_nonblank_normalized_and_exactly_bound() -> None:
+    with pytest.raises(ValueError):
+        artifact(decision_owner=" \t\n ")
+    request = admitted("walk_deliverable_v1", decision_owner="  Akshay Gupta  ")
+    assert request.decision_owner == "Akshay Gupta"
+    assert request.workflow_payload()["decision_owner"] == "Akshay Gupta"
+    deliverable = WalkDeliverable(kind="walk_deliverable_v1", deliverable_type="decision_memo",
+        decision_owner="\tAkshay Gupta\n", objective="Decide", non_goals=[],
+        proposed_artifact="Draft", alternatives=[], risks_and_rollback=[],
+        verification_plan=[], open_decisions=[], citations=[], summary_markdown="Draft only.")
+    assert deliverable.decision_owner == request.decision_owner
+    assert validate_output_identity(request, deliverable) == deliverable
+    payload = request.workflow_payload()
+    payload["decision_owner"] = "Other Human"
+    with pytest.raises(IntakeError):
+        validate_walk_payload(payload)
+
+
+def test_expected_disposition_is_hidden_from_prompt_and_checked_after_turn() -> None:
+    pass_request = admitted("walk_evidence_review_v1", expected_disposition="PASS")
+    hold_request = admitted("walk_evidence_review_v1", expected_disposition="HOLD")
+    assert walk_prompt(pass_request) == walk_prompt(hold_request)
+    instructions, prompt = walk_prompt(pass_request)
+    assert "expected_disposition" not in prompt
+    assert "frozen disposition" not in instructions.lower()
+    pass_output = WalkEvidenceReview(kind="walk_evidence_review_v1", verdict="PASS",
+        material_blockers=[], verified_claims=[], unverified_claims=[],
+        smallest_sufficient_remediation=[], citations=[], summary_markdown="Pass.")
+    hold_output = WalkEvidenceReview(kind="walk_evidence_review_v1", verdict="HOLD",
+        material_blockers=[{"requirement": "r", "evidence": "e", "impact": "i",
+            "remediation": "x"}], verified_claims=[], unverified_claims=[],
+        smallest_sufficient_remediation=["x"], citations=[], summary_markdown="Hold.")
+    with pytest.raises(ValueError, match="frozen disposition"):
+        validate_output_identity(pass_request, hold_output)
+    with pytest.raises(ValueError, match="frozen disposition"):
+        validate_output_identity(hold_request, pass_output)
 
 
 def test_citations_are_resolved_only_from_admitted_sources() -> None:
