@@ -10,6 +10,10 @@ from .contracts import DISCLOSURE_NOTICE_DIGEST, ProviderResult, canonical_diges
 DISCLOSURE_PROFILE = "external_disclosed_v1"
 PINNED_MODEL, PINNED_EFFORT = "gpt-5.6-sol", "medium"
 SDK_VERSION = RUNTIME_VERSION = "0.147.0"
+WALK_IMPLEMENTATION_SPEC_DIGEST = (
+    "f0887faff539e05de5fd16b20ed7bb72fbc8cf34a89929faaf0a59a710f3974d")
+CRAWL_ROLLBACK_RELEASE_DIGEST = (
+    "f3bfa08905600ae398a12d8a82cb4cc3ee294d8c08ef45c55d628c18e82be5a9")
 ALLOWED_PLANS = frozenset({"plus", "pro", "prolite", "team", "business", "enterprise", "edu"})
 
 
@@ -67,6 +71,36 @@ class ReleaseProfile(BaseModel, extra="forbid", frozen=True):
         return self.auth_expires_at > checked_at and self.evidence_expires_at > checked_at
 
 
+class WalkReleaseProfile(ReleaseProfile):
+    schema_version: Literal["walk-codex-subscription-release-v1"]
+    stage: Literal["Walk"]
+    implementation_spec_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    crawl_rollback_release_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workflow_families: tuple[
+        Literal["walk_state_synthesis_v1"],
+        Literal["walk_deliverable_v1"],
+        Literal["walk_evidence_review_v1"],
+    ]
+    deliverable_types: tuple[
+        Literal["decision_memo"], Literal["specification"],
+        Literal["experiment_design"], Literal["diligence_packet"],
+    ]
+
+    @model_validator(mode="after")
+    def walk_policy(self) -> WalkReleaseProfile:
+        from .walk import DELIVERABLE_TYPES, WALK_FAMILIES
+
+        if (self.workflow_families != WALK_FAMILIES
+                or self.deliverable_types != DELIVERABLE_TYPES
+                or self.implementation_spec_digest != WALK_IMPLEMENTATION_SPEC_DIGEST
+                or self.crawl_rollback_release_digest != CRAWL_ROLLBACK_RELEASE_DIGEST):
+            raise ValueError("release profile violates the frozen Walk policy")
+        return self
+
+
+SubscriptionProfile = ReleaseProfile | WalkReleaseProfile
+
+
 class FrozenDispatch(BaseModel, extra="forbid", frozen=True):
     schema_version: Literal["crawl-codex-subscription-dispatch-v1"] = (
         "crawl-codex-subscription-dispatch-v1")
@@ -106,7 +140,20 @@ class FrozenDispatch(BaseModel, extra="forbid", frozen=True):
         return canonical_digest(self.model_dump(mode="json"))
 
 
+class WalkFrozenDispatch(FrozenDispatch):
+    schema_version: Literal["walk-codex-subscription-dispatch-v1"] = (
+        "walk-codex-subscription-dispatch-v1")
+    workflow_family: Literal[
+        "walk_state_synthesis_v1", "walk_deliverable_v1", "walk_evidence_review_v1"
+    ]
+    result_schema_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+SubscriptionDispatch = FrozenDispatch | WalkFrozenDispatch
+
+
 class InferencePort(Protocol):
     async def generate(
-        self, dispatch: FrozenDispatch, request_body: dict[str, Any]
+        self, dispatch: SubscriptionDispatch, request_body: dict[str, Any]
     ) -> ProviderResult: ...

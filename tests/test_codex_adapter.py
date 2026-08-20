@@ -26,8 +26,9 @@ from glupta_agi.codex_adapter import (
     ProviderRejectedError,
     _launch_args,
 )
-from glupta_agi.inference import FrozenDispatch
-from tests.helpers import release_profile
+from glupta_agi.inference import FrozenDispatch, WalkFrozenDispatch
+from glupta_agi.walk import WalkStateSynthesis
+from tests.helpers import release_profile, walk_release_profile
 
 
 def _body() -> dict[str, object]:
@@ -55,6 +56,26 @@ def _dispatch(**changes: object) -> FrozenDispatch:
     }
     values.update(changes)
     return FrozenDispatch.model_validate(values)
+
+
+def _walk_body() -> dict[str, object]:
+    return {"input": "walk prompt", "instructions": "proposal only",
+        "model": "gpt-5.6-sol"}
+
+
+def _walk_dispatch(**changes: object) -> WalkFrozenDispatch:
+    profile, body = walk_release_profile(), _walk_body()
+    values = {**_dispatch().model_dump(mode="json"),
+        "schema_version": "walk-codex-subscription-dispatch-v1",
+        "request_body_digest": contracts.canonical_digest(body),
+        "release_profile_digest": profile.digest(),
+        "subscription_route_id": profile.subscription_route_id,
+        "workflow_family": "walk_state_synthesis_v1",
+        "result_schema_digest": contracts.canonical_digest(
+            WalkStateSynthesis.model_json_schema()),
+        "artifact_sha256": "c" * 64}
+    values.update(changes)
+    return WalkFrozenDispatch.model_validate(values)
 
 
 class FakeThread:
@@ -124,6 +145,13 @@ def _result(**changes: object) -> object:
     return SimpleNamespace(**values)
 
 
+def _walk_result(**changes: object) -> object:
+    output = WalkStateSynthesis(kind="walk_state_synthesis_v1", current_facts=[],
+        blockers=[], uncertainties=[], prioritized_next_actions=[],
+        summary_markdown="Proposal only.", citations=[])
+    return _result(final_response=output.model_dump_json(), **changes)
+
+
 def test_exact_subscription_account_and_native_safety_controls() -> None:
     client, constructed, phases = FakeClient(_result()), [], []
 
@@ -148,6 +176,24 @@ def test_exact_subscription_account_and_native_safety_controls() -> None:
     assert kwargs["output_schema"] == contracts.EvidenceBrief.model_json_schema()
     assert phases == ["account_lookup_started", "model_catalog_started",
         "thread_start_started", "turn_invocation_started", "turn_returned"]
+
+
+def test_walk_uses_exact_family_schema_and_same_native_safety_controls() -> None:
+    profile, client, phases = walk_release_profile(), FakeClient(_walk_result()), []
+    result = asyncio.run(CodexSubscriptionAdapter(profile, Path("/private/codex"),
+        auth_generation=1, phase_recorder=phases.append,
+        client_factory=lambda _config: client).generate(_walk_dispatch(), _walk_body()))
+    assert result.output.kind == "walk_state_synthesis_v1"
+    assert result.audit.workflow_family == "walk_state_synthesis_v1"
+    assert result.audit.result_schema_digest == contracts.canonical_digest(
+        WalkStateSynthesis.model_json_schema())
+    assert client.thread_kwargs["base_instructions"] == "proposal only"
+    prompt, kwargs = client.thread.run_kwargs
+    assert prompt == "walk prompt"
+    assert kwargs["output_schema"] == WalkStateSynthesis.model_json_schema()
+    assert kwargs["sandbox"].value == "read-only"
+    assert kwargs["approval_mode"].value == "deny_all"
+    assert phases[-2:] == ["turn_invocation_started", "turn_returned"]
 
 
 def test_clean_launcher_uses_only_env_i_and_explicit_runtime_state() -> None:

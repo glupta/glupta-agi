@@ -8,7 +8,9 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from .inference import PINNED_MODEL, ReleaseProfile
+from pydantic import TypeAdapter
+
+from .inference import PINNED_MODEL, ReleaseProfile, SubscriptionProfile, WalkReleaseProfile
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "postgres"})
 
@@ -68,7 +70,7 @@ def _validate_codex_home(path: Path) -> None:
 class Settings:
     input_root: Path
     token: str
-    release_profile: ReleaseProfile | None = None
+    release_profile: SubscriptionProfile | None = None
     release_profile_digest: str = ""
     codex_home: Path | None = None
     auth_generation: int = 0
@@ -81,7 +83,7 @@ class Settings:
         )
         invalid_profile = False
         try:
-            profile = ReleaseProfile.model_validate_json(
+            profile = TypeAdapter(SubscriptionProfile).validate_json(
                 _read_private_file(profile_path, label="release profile", maximum_bytes=32_768)
             )
         except ValueError:
@@ -119,10 +121,23 @@ class Settings:
         )
 
     def require_external_profile(self) -> tuple[ReleaseProfile, Path, int]:
-        if self.release_profile is None or self.codex_home is None:
+        if not isinstance(self.release_profile, ReleaseProfile) or isinstance(
+                self.release_profile, WalkReleaseProfile) or self.codex_home is None:
             raise SettingsError("external inference release profile is unavailable")
         if self.release_profile.digest() != self.release_profile_digest:
             raise SettingsError("external inference release profile changed")
+        if not self.release_profile.current_at():
+            raise SettingsError("release profile evidence is expired")
+        if self.auth_generation != self.release_profile.auth_generation:
+            raise SettingsError("subscription auth generation does not match the release profile")
+        _validate_codex_home(self.codex_home)
+        return self.release_profile, self.codex_home, self.auth_generation
+
+    def require_walk_profile(self) -> tuple[WalkReleaseProfile, Path, int]:
+        if not isinstance(self.release_profile, WalkReleaseProfile) or self.codex_home is None:
+            raise SettingsError("Walk release profile is unavailable")
+        if self.release_profile.digest() != self.release_profile_digest:
+            raise SettingsError("Walk release profile changed")
         if not self.release_profile.current_at():
             raise SettingsError("release profile evidence is expired")
         if self.auth_generation != self.release_profile.auth_generation:

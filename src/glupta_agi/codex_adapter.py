@@ -16,7 +16,14 @@ from openai_codex.generated.v2_all import ChatgptAccount, ReasoningEffort, TurnS
 
 from . import contracts
 from .brief import SYSTEM_PROMPT
-from .inference import RUNTIME_VERSION, SDK_VERSION, FrozenDispatch, ReleaseProfile
+from .inference import (
+    RUNTIME_VERSION,
+    SDK_VERSION,
+    SubscriptionDispatch,
+    SubscriptionProfile,
+    WalkFrozenDispatch,
+)
+from .walk import WalkProviderAudit, WalkProviderResult, output_model, walk_record_digest
 
 _BLOCKED_ENV = {"CODEX_API_KEY", "CODEX_ACCESS_TOKEN"}
 _DISABLED_FEATURES = ("apps", "multi_agent", "plugins", "remote_plugin", "shell_tool", "skill_search")
@@ -43,20 +50,20 @@ def _launch_args(codex_home: Path, state_home: Path) -> tuple[str, ...]:
     path = os.defpath
     if (tools := bundled_path_dir()) is not None:
         path = os.pathsep.join((str(tools), path))
-    environment = {"CODEX_HOME": str(codex_home), "HOME": str(codex_home.parent), "LANG": "C.UTF-8", "PATH": path, "TMPDIR": tempfile.gettempdir(), "STUDIO_CODEX_SESSION_ORIGIN": "glupta-crawl-subscription-v1"}
+    environment = {"CODEX_HOME": str(codex_home), "HOME": str(codex_home.parent), "LANG": "C.UTF-8", "PATH": path, "TMPDIR": tempfile.gettempdir(), "STUDIO_CODEX_SESSION_ORIGIN": "glupta-subscription-v1"}
     assignments = tuple(f"{key}={value}" for key, value in sorted(environment.items()))
     disabled = tuple(arg for feature in ("apps", "plugins", "remote_plugin") for arg in ("--disable", feature))
     return (env_binary, "-i", *assignments, str(bundled_codex_path()), "-c", 'cli_auth_credentials_store="file"', "-c", 'history.persistence="none"', "-c", f"sqlite_home={json.dumps(str(state_home))}", "app-server", *disabled, "--listen", "stdio://")
 
 
 class CodexSubscriptionAdapter:
-    def __init__(self, profile: ReleaseProfile, codex_home: Path, *, auth_generation: int,
+    def __init__(self, profile: SubscriptionProfile, codex_home: Path, *, auth_generation: int,
         phase_recorder: Any, client_factory: Any = AsyncCodex) -> None:
         self.profile, self.codex_home, self.phase_recorder = profile, codex_home, phase_recorder
         self.auth_generation, self.client_factory = auth_generation, client_factory
 
-    async def generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> contracts.ProviderResult:
-        error: tuple[type[AdapterError], str, contracts.ProviderAudit | None] | None = None
+    async def generate(self, dispatch: SubscriptionDispatch, request_body: dict[str, Any]) -> Any:
+        error: tuple[type[AdapterError], str, Any] | None = None
         try:
             result = await self._generate(dispatch, request_body)
         except AdapterError as exc:
@@ -68,7 +75,7 @@ class CodexSubscriptionAdapter:
             raise error[0](error[1], error[2]) from None
         return result
 
-    async def _generate(self, dispatch: FrozenDispatch, request_body: dict[str, Any]) -> contracts.ProviderResult:
+    async def _generate(self, dispatch: SubscriptionDispatch, request_body: dict[str, Any]) -> Any:
         if not self.profile.current_at() or dispatch.release_profile_digest != self.profile.digest() or dispatch.request_body_digest != contracts.canonical_digest(request_body):
             raise AdapterError("subscription request changed after effect reservation")
         identity = dispatch.subscription_route_id, dispatch.subscription_plan, dispatch.auth_generation, dispatch.model, dispatch.reasoning_effort
@@ -100,10 +107,15 @@ class CodexSubscriptionAdapter:
                         raise AdapterError("approved Codex model is unavailable")
                     config = {"features": {feature: False for feature in _DISABLED_FEATURES}, "model_provider": "crawl_openai", "model_providers": {"crawl_openai": {"name": "OpenAI", "requires_openai_auth": True, "wire_api": "responses", "request_max_retries": 0, "stream_max_retries": 0}}, "tools": {"view_image": False}, "web_search": WebSearchMode.disabled.value}
                     self.phase_recorder("thread_start_started")
-                    thread = await client.thread_start(approval_mode=ApprovalMode.deny_all, base_instructions=SYSTEM_PROMPT, config=config, cwd=cwd, ephemeral=True, model=dispatch.model, sandbox=Sandbox.read_only)
+                    thread = await client.thread_start(approval_mode=ApprovalMode.deny_all,
+                        base_instructions=str(request_body.get("instructions", SYSTEM_PROMPT)),
+                        config=config, cwd=cwd, ephemeral=True, model=dispatch.model,
+                        sandbox=Sandbox.read_only)
                     self.phase_recorder("turn_invocation_started")
                     turn_invoked = True
-                    result = await thread.run(str(request_body["input"]), approval_mode=ApprovalMode.deny_all, cwd=cwd, effort=ReasoningEffort.medium, model=dispatch.model, output_schema=contracts.EvidenceBrief.model_json_schema(), sandbox=Sandbox.read_only)
+                    schema = (output_model(dispatch.workflow_family) if isinstance(
+                        dispatch, WalkFrozenDispatch) else contracts.EvidenceBrief)
+                    result = await thread.run(str(request_body["input"]), approval_mode=ApprovalMode.deny_all, cwd=cwd, effort=ReasoningEffort.medium, model=dispatch.model, output_schema=schema.model_json_schema(), sandbox=Sandbox.read_only)
                     self.phase_recorder("turn_returned")
                     completed = datetime.now(UTC)
         except (Exception, asyncio.CancelledError) as exc:
@@ -131,15 +143,33 @@ class CodexSubscriptionAdapter:
             counts = usage.input_tokens, usage.cached_input_tokens, usage.cache_write_input_tokens or 0, usage.output_tokens, usage.reasoning_output_tokens, usage.total_tokens
             if any(type(value) is not int or value < 0 for value in counts):
                 raise ValueError
-            brief = contracts.EvidenceBrief.model_validate_json(result.final_response or "")
+            output = schema.model_validate_json(result.final_response or "")
         except (AttributeError, ValueError):
             raise ProviderRejectedError("Codex subscription output or usage is invalid") from None
         input_tokens, cached, cache_write, output_tokens, reasoning, total = counts
         limits = dispatch.max_observed_input_tokens, dispatch.max_observed_output_tokens, dispatch.max_observed_reasoning_tokens
         if total != input_tokens + output_tokens or cached + cache_write > input_tokens or reasoning > output_tokens or any(value > limit for value, limit in zip((input_tokens, output_tokens, reasoning), limits, strict=True)):
             raise ProviderRejectedError("Codex subscription usage exceeded the observed ceiling")
-        audit = contracts.ProviderAudit(workflow_id=dispatch.workflow_id, request_digest=dispatch.request_digest, release_profile_digest=dispatch.release_profile_digest, subscription_route_id=dispatch.subscription_route_id, subscription_plan=dispatch.subscription_plan, sdk_version=SDK_VERSION, runtime_version=RUNTIME_VERSION, thread_id=thread.id, turn_id=result.id, requested_model=dispatch.model, reasoning_effort=dispatch.reasoning_effort, status="completed", input_tokens=input_tokens, cached_input_tokens=cached, cache_write_input_tokens=cache_write, output_tokens=output_tokens, reasoning_tokens=reasoning, total_tokens=total, request_body_digest=dispatch.request_body_digest, output_digest=contracts.canonical_digest(result.final_response), started_at=started, completed_at=completed)
-        digest = contracts.canonical_digest(brief.model_dump(mode="json"))
+        common = dict(workflow_id=dispatch.workflow_id, request_digest=dispatch.request_digest,
+            release_profile_digest=dispatch.release_profile_digest,
+            subscription_route_id=dispatch.subscription_route_id,
+            subscription_plan=dispatch.subscription_plan, sdk_version=SDK_VERSION,
+            runtime_version=RUNTIME_VERSION, thread_id=thread.id, turn_id=result.id,
+            requested_model=dispatch.model, reasoning_effort=dispatch.reasoning_effort,
+            status="completed", input_tokens=input_tokens, cached_input_tokens=cached,
+            cache_write_input_tokens=cache_write, output_tokens=output_tokens,
+            reasoning_tokens=reasoning, total_tokens=total,
+            request_body_digest=dispatch.request_body_digest,
+            output_digest=contracts.canonical_digest(result.final_response),
+            started_at=started, completed_at=completed)
+        audit = (WalkProviderAudit(schema_version="walk-codex-subscription-audit-v1",
+            workflow_family=dispatch.workflow_family,
+            result_schema_digest=dispatch.result_schema_digest, **common)
+            if isinstance(dispatch, WalkFrozenDispatch) else contracts.ProviderAudit(**common))
+        digest = contracts.canonical_digest(output.model_dump(mode="json"))
         audit = audit.model_copy(update={"validated_result_digest": digest})
-        audit = audit.model_copy(update={"record_digest": contracts.provider_record_digest(brief, audit)})
-        return contracts.ProviderResult(brief=brief, audit=audit)
+        record_digest = (walk_record_digest(output, audit) if isinstance(
+            audit, WalkProviderAudit) else contracts.provider_record_digest(output, audit))
+        audit = audit.model_copy(update={"record_digest": record_digest})
+        return (WalkProviderResult(output=output, audit=audit) if isinstance(
+            audit, WalkProviderAudit) else contracts.ProviderResult(brief=output, audit=audit))

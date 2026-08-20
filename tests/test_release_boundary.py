@@ -30,7 +30,7 @@ class ReleaseBoundaryTests(TestCase):
     def test_package_runtime_api_and_dbos_share_one_version_identity(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-        self.assertEqual(project["project"]["version"], "0.4.4")
+        self.assertEqual(project["project"]["version"], "0.5.0")
         self.assertEqual(project["project"]["version"], __version__)
         self.assertEqual(metadata("glupta-agi")["Version"], __version__)
         self.assertNotIn(__version__, (SOURCE / "__init__.py").read_text(encoding="utf-8"))
@@ -74,7 +74,7 @@ class ReleaseBoundaryTests(TestCase):
         normalized = " ".join(readme.split())
         self.assertIn("official `openai-codex` SDK", readme)
         self.assertIn("non-usage-based ChatGPT subscription", readme)
-        self.assertIn("deployment- and dispatch-held candidate", readme)
+        self.assertIn("deployment-, evaluation-, and activation-held Walk", readme)
         self.assertIn("Provider dispatch, task draining, and a controlled canary", normalized)
         self.assertIn("attest_codex_subscription_volume.py", readme)
         self.assertIn("It never reads authentication bytes", readme)
@@ -87,14 +87,31 @@ class ReleaseBoundaryTests(TestCase):
         self.assertNotIn("OpenAI Responses API edge", readme)
         self.assertNotIn("GLUPTA_CREDENTIAL_GENERATION", readme)
 
-    def test_production_semantic_line_budget_is_at_most_1500(self) -> None:
+    def test_walk_stage_is_exact_proposal_only_and_reuses_native_boundaries(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        api = (SOURCE / "api.py").read_text(encoding="utf-8")
+        workflow = (SOURCE / "workflow.py").read_text(encoding="utf-8")
+        effects = (SOURCE / "effects.py").read_text(encoding="utf-8")
+        walk = (SOURCE / "walk.py").read_text(encoding="utf-8")
+        for family in ("walk_state_synthesis_v1", "walk_deliverable_v1",
+                "walk_evidence_review_v1"):
+            self.assertIn(family, walk)
+        self.assertIn('@app.post("/v1/walk/proposals"', api)
+        self.assertIn('@DBOS.step(name="walk_proposal_model_v1", retries_allowed=False)',
+            workflow)
+        self.assertIn("walk_queue = crawl_observe_queue", workflow)
+        self.assertIn("crawl_external_effects_v4", effects)
+        self.assertIn("Calls remain capped at one", readme)
+        self.assertIn("Landing 0.5.0 does not grant", readme)
+
+    def test_production_semantic_line_budget_is_at_most_3000_for_walk(self) -> None:
         lines = (
             line
             for path in SOURCE.glob("*.py")
             for line in path.read_text(encoding="utf-8").splitlines()
         )
         count = sum(bool(line.strip()) and not line.lstrip().startswith("#") for line in lines)
-        self.assertLessEqual(count, 1500)
+        self.assertLessEqual(count, 3000)
 
     def test_container_and_database_bases_are_digest_pinned(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

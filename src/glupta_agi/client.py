@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import os
@@ -16,8 +17,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from pydantic import BaseModel
+
 from .contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefResponse
 from .intake import CanonicalRequest, IntakeError, _validate_relative_path
+from .walk import WalkArtifact, WalkResponse
 
 MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_SECONDS = 2 * 1024 * 1024, 330
 
@@ -112,14 +116,17 @@ def _request_payload(question: str, files: Sequence[str], *, ack: bool) -> bytes
 
 
 def _submit_payload(payload: bytes, endpoint: str, token_file: Path, idempotency_key: str | None,
-                    opener: Callable[..., Any] | None) -> dict[str, Any]:
+                    opener: Callable[..., Any] | None, *, route: str = "/v1/evidence-brief",
+                    response_model: type[BaseModel] = EvidenceBriefResponse,
+                    extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     base_url = _validate_endpoint(endpoint)
     workflow_id = _workflow_id(idempotency_key)
     capability = _read_capability(token_file)
     headers = {"Authorization": f"Bearer {capability}", "Content-Type": "application/json",
                "Idempotency-Key": workflow_id}
+    headers.update(extra_headers or {})
     request = urllib.request.Request(  # noqa: S310 -- URL is validated loopback HTTP
-        f"{base_url}/v1/evidence-brief", data=payload, headers=headers, method="POST")
+        f"{base_url}{route}", data=payload, headers=headers, method="POST")
     failure = None
     try:
         open_request = opener or urllib.request.build_opener(
@@ -136,9 +143,9 @@ def _submit_payload(payload: bytes, endpoint: str, token_file: Path, idempotency
     if len(body) > MAX_RESPONSE_BYTES:
         raise ClientError("server response exceeds the client limit")
     try:
-        result = EvidenceBriefResponse.model_validate_json(body)
+        result = response_model.model_validate_json(body)
     except ValueError:
-        raise ClientError("server returned an invalid evidence brief") from None
+        raise ClientError("server returned an invalid response") from None
     if result.workflow_id != workflow_id:
         raise ClientError("server returned a mismatched workflow result")
     return result.model_dump(mode="json")
@@ -172,6 +179,28 @@ def submit_inline(canonical: CanonicalRequest, endpoint: str, token_file: Path,
     except ClientError as exc:
         error = str(exc)
     del canonical, sources, payload
+    if error is not None:
+        raise ClientError(error) from None
+    return result
+
+
+def submit_walk_artifact(artifact_bytes: bytes, artifact_sha256: str, endpoint: str,
+    token_file: Path, idempotency_key: str | None = None, *,
+    opener: Callable[..., Any] | None = None) -> dict[str, Any]:
+    error = None
+    try:
+        if (len(artifact_bytes) > 512 * 1024
+                or hashlib.sha256(artifact_bytes).hexdigest() != artifact_sha256):
+            raise ClientError("Walk artifact does not match its approved digest")
+        WalkArtifact.model_validate_json(artifact_bytes)
+        result = _submit_payload(artifact_bytes, endpoint, token_file, idempotency_key,
+            opener, route="/v1/walk/proposals", response_model=WalkResponse,
+            extra_headers={"X-Artifact-SHA256": artifact_sha256})
+    except (ClientError, ValueError) as exc:
+        error = str(exc) if isinstance(exc, ClientError) else "Walk artifact is invalid"
+    artifact_bytes = b""
+    artifact_sha256 = endpoint = idempotency_key = ""
+    token_file, opener = Path(), None
     if error is not None:
         raise ClientError(error) from None
     return result

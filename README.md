@@ -9,11 +9,13 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Version `0.4.4` is a **deployment- and dispatch-held candidate**, not a running
-production release. Crawl adopts the official `openai-codex` SDK and its pinned
-Codex runtime, authenticated by an approved ChatGPT subscription. It does not
-accept an OpenAI API key, project, service account, metered API route, or USD
-budget.
+Version `0.5.0` is a **deployment-, evaluation-, and activation-held Walk
+candidate**. It preserves Crawl and adds only the approved proposal-only Walk
+stage; it is not authorization to deploy, dispatch a model turn, drain tasks,
+run the 15-case evaluation, or activate Walk. Both stages use the official `openai-codex` SDK
+and pinned Codex runtime through a non-usage-based ChatGPT
+subscription. They do not accept an OpenAI API key, project, service account,
+metered API route, or USD budget.
 
 The 0.4.2 candidate removed Crawl's Pydantic AI `FunctionModel` translation
 bridge. The single native Codex turn now runs inside one named DBOS step with
@@ -58,6 +60,59 @@ Since 0.4.3, the material incident ledger is:
   canary remain held; a future approved canary must use the exact-byte-bound
   inline route and the same fixed 422 boundary.
 
+## Walk v1 candidate
+
+Walk v1 implements exactly three proposal-only families:
+`walk_state_synthesis_v1`, `walk_deliverable_v1`, and
+`walk_evidence_review_v1`. Outputs are strict typed JSON with a bounded Markdown
+rendering field and citations resolved against the admitted source bytes. Walk
+cannot publish, approve, message, merge, deploy, spend, sign, transact, browse,
+invoke tools, or claim a human decision.
+
+The implementation reuses the maintained DBOS workflow/step/queue primitives,
+PostgreSQL effect store, Pydantic contracts, FastAPI admission surface, and
+official Codex SDK already adopted for Crawl. It adds no framework, service,
+database, table, scheduler, queue, tool runtime, or compatibility layer. The
+small custom layer is limited to the missing domain contract: three exact Walk
+schemas, manual artifact approval identity, proposal-only prompts, stage-specific
+release identity, and citation validation. Walk has a distinct workflow and
+DBOS step identity while sharing the single-concurrency queue and the existing
+`model-0` effect fence. Calls remain capped at one, SDK/provider retries remain
+zero, and any possibly dispatched outcome remains sticky-unknown.
+
+Every request is a compact JSON artifact capped at 512 KiB and bound to its raw
+SHA-256 through `X-Artifact-SHA256`. The server streams under that cap and proves
+the digest before bearer authentication, queue admission, or effect reservation.
+The artifact additionally binds its Walk family, decision owner, conditional
+deliverable/review fields, release-profile digest, exact source bytes and source
+hashes. The release profile binds the approved implementation-spec digest and
+the exact prior Crawl release digest used for rollback.
+
+Since the prior release, the change-focused incident and setup ledger is:
+
+- **Admission/path failures:** prior Crawl canaries showed that operator path
+  spellings and mutable request artifacts can fail before workflow creation.
+  Walk removes server-side path interpretation: the tracked helper captures the
+  source bytes, emits one mode-`0600` artifact, and execution requires its exact
+  approved SHA. Wrong, changed, oversized, or invalid artifacts fail before
+  capability access or submission.
+- **Confidentiality boundary:** prior validation and protocol failures retained
+  source or bearer-bearing locals. Walk uses bounded non-raising admission and
+  outer exception reminting; capture-locals regressions cover workflow and
+  client failures. Raw source, token, provider error, and artifact bytes are not
+  emitted in errors or receipts.
+- **Container/runtime/setup:** the shellless runtime still requires the single
+  digest-sourced `/usr/bin/env` adopted in 0.4.3; Compose remains exactly `app`
+  plus `postgres`, with the same UID, read-only root, volume, egress, restart,
+  and rollback controls. The test-runner PATH failure was fixed at the root by
+  moving dev tools to uv's native default dependency group, so
+  `uv run --locked pytest` cannot fall through to host Python. No new runtime
+  package or container service is introduced.
+- **Deployment, restart, rollback, and canary:** this candidate performs none of
+  them. Deterministic isolated startup/rollback proof and the previous Crawl
+  release digest remain gates; a Walk canary and the 15-case stage evaluation
+  require separate post-landing authority.
+
 The source-stage package is Debian `coreutils 9.1-1`; its corresponding source
 is Debian's `coreutils_9.1.orig.tar.xz` plus `coreutils_9.1-1.debian.tar.xz` in
 the Bookworm archive. Final-image package scanners do not attribute the copied
@@ -96,10 +151,10 @@ Selected file contents and the question are disclosed to the ChatGPT
 subscription account through Codex. The local client requires
 `--ack-external-disclosure`; select only material approved for that account.
 
-The Crawl acceptance boundary is one useful durable `OBSERVE` brief, durable
-workflow/effect state, authenticated loopback intake, explicit local files, and
-no action tools. DIRECT, COMPOUND, EXECUTE, Walk, and broader Hermes activation
-remain disabled.
+The Crawl acceptance boundary remains one useful durable `OBSERVE` brief.
+Walk's candidate boundary is proposal generation only through the three frozen
+families and manual artifact approval. DIRECT, COMPOUND, EXECUTE, public Walk,
+and broader Hermes activation remain disabled.
 
 ## Quality loop
 
@@ -356,3 +411,33 @@ client transport, API endpoint, and workflow payload already own validation,
 HTTP, authentication, admission, and durable request identity. The inline
 request branch is custom only for the missing approval-to-admission byte
 binding; it adds no dependency, service, store, endpoint, retry, or effect.
+
+### Held Walk artifact workflow
+
+Creating and verifying an artifact are offline operations. `create` securely
+admits the selected files, writes a new mode-`0600` artifact without replacing
+an existing path, and prints its SHA-256:
+
+```sh
+uv run --locked python scripts/walk_request_v1.py create \
+  --input-root inputs \
+  --family walk_state_synthesis_v1 \
+  --decision-owner Akshay \
+  --release-profile-digest <approved-walk-profile-digest> \
+  --question "What is the current state and the smallest useful next action?" \
+  --ack-external-disclosure \
+  --output /private/review/glupta-walk-request-v1.json \
+  selected-source.md
+
+uv run --locked python scripts/walk_request_v1.py verify \
+  --artifact-sha256 <approved-artifact-sha256> \
+  /private/review/glupta-walk-request-v1.json
+```
+
+`walk_deliverable_v1` additionally requires `--deliverable-type`; the evidence
+review family requires `--expected-disposition`. `execute` repeats all artifact
+checks, creates or validates a canonical UUIDv7 idempotency key through the
+existing client, and submits the exact approved bytes. It is deliberately not
+shown as a routine command because it is a provider dispatch and requires a
+separate exact-artifact approval after deployment. Landing 0.5.0 does not grant
+that authority.
