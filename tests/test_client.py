@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -23,8 +24,10 @@ from glupta_agi.client import (
     _validate_token_metadata,
     main,
     submit,
+    submit_inline,
 )
 from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief
+from glupta_agi.intake import admit_inline_request
 from tests.helpers import provider_audit
 
 
@@ -40,6 +43,33 @@ class _Response:
 
     def read(self, limit: int) -> bytes:
         return self.body[:limit]
+
+
+def _assert_client_trace_sanitized(
+    case: unittest.TestCase, error: BaseException, expected_frames: list[str], *markers: str,
+) -> None:
+    case.assertIsNone(error.__cause__)
+    case.assertIsNone(error.__context__)
+    captured = traceback.TracebackException.from_exception(error, capture_locals=True)
+    product_frames: list[str] = []
+    cursor = error.__traceback__
+    while cursor is not None:
+        frame = cursor.tb_frame
+        if "/src/glupta_agi/" in frame.f_code.co_filename:
+            product_frames.append(frame.f_code.co_name)
+            captured_frame = next(
+                item for item in captured.stack
+                if item.filename == frame.f_code.co_filename and item.lineno == cursor.tb_lineno
+            )
+            for marker in markers:
+                case.assertNotIn(marker, repr(frame.f_locals))
+                case.assertNotIn(marker, repr(captured_frame.locals))
+        cursor = cursor.tb_next
+    for marker in markers:
+        case.assertNotIn(marker, str(error))
+        case.assertNotIn(marker, repr(vars(error)))
+        case.assertNotIn(marker, "".join(traceback.format_exception(error)))
+    case.assertEqual(product_frames, expected_frames)
 
 
 class ClientTests(unittest.TestCase):
@@ -103,6 +133,86 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(generated, workflow_id)
             self.assertEqual(seen["timeout"], 330)
             self.assertEqual(result["markdown"], "# Evidence brief\n")
+
+    def test_submit_inline_sends_exact_validated_source_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            token = self._token(Path(temporary))
+            workflow_id, request_digest = (
+                "01a01407-fe3e-72aa-9b8f-7666915df735", "d" * 64
+            )
+            brief = EvidenceBrief(
+                answer="grounded", citations=[], uncertainties=[], next_decisions=[]
+            )
+            body = json.dumps({
+                **brief.model_dump(mode="json"),
+                "request_digest": request_digest,
+                "workflow_id": workflow_id,
+                "markdown": "# Evidence brief\n",
+                "provider_audit": provider_audit(
+                    brief, workflow_id=workflow_id, request_digest=request_digest
+                ).model_dump(mode="json"),
+            }).encode()
+            seen: dict[str, object] = {}
+
+            def open_request(request: object, timeout: int) -> _Response:
+                seen["request"], seen["timeout"] = request, timeout
+                return _Response(body)
+
+            canonical = admit_inline_request(
+                question="What changed?",
+                sources=[{"path": "packet.txt", "content": "approved bytes\n"}],
+                disclosure_profile="external_disclosed_v1",
+                disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+                external_disclosure_ack=True,
+            )
+            submit_inline(
+                canonical, "http://127.0.0.1:8765", token, workflow_id, opener=open_request
+            )
+
+        payload = json.loads(seen["request"].data)  # type: ignore[union-attr]
+        self.assertEqual(
+            payload["sources"], [{"path": "packet.txt", "content": "approved bytes\n"}]
+        )
+        self.assertNotIn("files", payload)
+
+    def test_http_protocol_failures_are_safe_outside_source_and_bearer_frames(self) -> None:
+        source_marker = "INLINE_CLIENT_PRIVATE_SOURCE_MARKER"
+        bearer_marker = "INLINE_CLIENT_PRIVATE_BEARER_" + "b" * 32
+        canonical = admit_inline_request(
+            question="q",
+            sources=[{"path": "safe.md", "content": source_marker}],
+            disclosure_profile="external_disclosed_v1",
+            disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+            external_disclosure_ack=True,
+        )
+        failures = (
+            http.client.IncompleteRead(source_marker.encode(), 999),
+            http.client.BadStatusLine(bearer_marker),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            token = self._token(Path(temporary), bearer_marker)
+            for failure in failures:
+                def fail_transport(
+                    *_args: object,
+                    _failure: http.client.HTTPException = failure,
+                    **_kwargs: object,
+                ) -> object:
+                    raise _failure
+
+                with self.subTest(failure=type(failure).__name__):
+                    try:
+                        submit_inline(
+                            canonical, "http://127.0.0.1:8765", token,
+                            opener=fail_transport,
+                        )
+                    except ClientError as error:
+                        caught = error
+                    else:
+                        self.fail("expected ClientError")
+                    self.assertEqual(str(caught), "Crawl API is unavailable")
+                    _assert_client_trace_sanitized(
+                        self, caught, ["submit_inline"], source_marker, bearer_marker
+                    )
 
     def test_external_disclosure_must_be_explicit_before_capability_read_or_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -9,7 +9,7 @@ accepts one question and up to 20 explicitly selected UTF-8 Markdown or text
 files from a read-only input root. It produces a typed, source-grounded brief
 with resolvable file-and-line citations, uncertainties, and next decisions.
 
-Version `0.4.3` is a **deployment- and dispatch-held candidate**, not a running
+Version `0.4.4` is a **deployment- and dispatch-held candidate**, not a running
 production release. Crawl adopts the official `openai-codex` SDK and its pinned
 Codex runtime, authenticated by an approved ChatGPT subscription. It does not
 accept an OpenAI API key, project, service account, metered API route, or USD
@@ -22,7 +22,7 @@ the offline evaluation primitive. The component-by-component evidence and
 deferred alternatives are recorded in
 [`docs/component-market-review-2026-08-19.md`](docs/component-market-review-2026-08-19.md).
 
-The 0.4.3 runtime adds only the standalone GNU coreutils `env` executable from
+The live 0.4.3 runtime adds only the standalone GNU coreutils `env` executable from
 the digest-pinned Debian Bookworm image, with its GPL-3+ copyright and license
 files. The Chainguard runtime does not provide an executable `env` on Python's
 default search path, while the official SDK's environment overlay cannot clear
@@ -31,6 +31,13 @@ coreutils is a larger multicall binary with extra runtime libraries, and
 BusyBox would reintroduce a shell applet. The dedicated 68 KiB Debian binary
 therefore preserves the required `env -i` boundary without a launcher, shell,
 service, or Python dependency.
+
+The 0.4.4 candidate binds separately approved canary or conditional-drain
+artifacts to the exact source bytes admitted through the existing endpoint.
+It also sanitizes rejected API headers, expected client HTTP protocol failures,
+and approval-helper preflight failures before they cross public traceback
+boundaries. It does not change provider dispatch, effects, budgets, retries,
+workflow topology, or any held deployment or task-drain authority.
 
 The source-stage package is Debian `coreutils 9.1-1`; its corresponding source
 is Debian's `coreutils_9.1.orig.tar.xz` plus `coreutils_9.1-1.debian.tar.xz` in
@@ -269,3 +276,43 @@ elsewhere.
 For replay-sensitive work, use a versioned input filename and preserve its
 bytes. Record its SHA-256 and idempotency key; exact replay requires the same
 question and selected content.
+
+### Canary and conditional-drain approval requests
+
+Use the tracked v2 helper when a submission requires approval. It binds each
+repository path to the exact path the client will select, then proves the
+selected path is a non-symlink regular file with the approved SHA-256 before
+emitting the artifact:
+
+```sh
+uv run python scripts/crawl_request_v2.py create \
+  --purpose canary \
+  --question "What changed, what is uncertain, and what should we decide next?" \
+  inputs/versioned-packet.txt > /private/review/glupta-canary-request-v2.json
+```
+
+Hash and approve that exact JSON artifact. Immediately before execution, the
+same helper rechecks the artifact digest and source SHA, retains the exact
+verified `CanonicalRequest` source bytes, and submits them inline using only
+the approved `client_selected_path`. The existing strict Pydantic endpoint
+schema and `admit_inline_request` validator admit those bytes; the server's
+configured input root is irrelevant to this path. Artifact digest and source
+preflight complete before capability access or submission:
+
+```sh
+uv run python scripts/crawl_request_v2.py execute \
+  --artifact-sha256 <approved-artifact-sha256> \
+  --idempotency-key <approved-uuidv7> \
+  /private/review/glupta-canary-request-v2.json
+```
+
+Use `--purpose conditional_drain` for a separately approved drain artifact.
+`verify` performs the same deterministic preflight without reading a token or
+dispatching: `uv run python scripts/crawl_request_v2.py verify \
+--artifact-sha256 SHA256 REQUEST.json`.
+
+Build-versus-adopt: Pydantic's strict request models and the existing intake,
+client transport, API endpoint, and workflow payload already own validation,
+HTTP, authentication, admission, and durable request identity. The inline
+request branch is custom only for the missing approval-to-admission byte
+binding; it adds no dependency, service, store, endpoint, retry, or effect.

@@ -24,11 +24,6 @@ class SourceDocument:
     byte_size: int
     content: str
 
-    @property
-    def lines(self) -> tuple[str, ...]:
-        return tuple(self.content.splitlines())
-
-
 @dataclass(frozen=True)
 class CanonicalRequest:
     question: str
@@ -42,10 +37,6 @@ class CanonicalRequest:
         payload = asdict(self)
         payload["sources"] = list(payload["sources"])
         return payload
-
-    def matches_recorded_payload(self, recorded: object) -> bool:
-        return recorded == self.workflow_payload()
-
 
 def _canonical_request(
     question: str, sources: tuple[SourceDocument, ...], disclosure_profile: str,

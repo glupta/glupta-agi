@@ -11,9 +11,14 @@ from unittest.mock import ANY, AsyncMock, patch
 from fastapi import HTTPException
 
 from glupta_agi.api import evidence_brief
-from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief, EvidenceBriefRequest
+from glupta_agi.contracts import (
+    DISCLOSURE_NOTICE_DIGEST,
+    EvidenceBrief,
+    EvidenceBriefInlineRequest,
+    EvidenceBriefRequest,
+)
 from glupta_agi.effects import AmbiguousEffectError
-from glupta_agi.intake import load_request
+from glupta_agi.intake import admit_inline_request, load_request
 from glupta_agi.settings import Settings
 from glupta_agi.workflow import BriefGenerationError, evidence_brief_workflow
 from tests.helpers import codex_home, provider_audit, release_profile
@@ -122,6 +127,113 @@ class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
         )
         admitted_at = datetime.fromisoformat(enqueue.await_args.args[-1])
         self.assertIsNotNone(admitted_at.tzinfo)
+
+    async def test_inline_admission_binds_http_bytes_not_server_input_root(self) -> None:
+        workflow_id = "01a011ce-66e7-70d0-94ca-d49cd9977082"
+        token, content = "t" * 32, "approved inline bytes\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "facts.md").write_text("different server-root bytes\n", encoding="utf-8")
+            profile, home = release_profile(), codex_home(root)
+            request = EvidenceBriefInlineRequest(
+                question="What is grounded?",
+                sources=[{"path": "facts.md", "content": content}],
+                disclosure_profile="external_disclosed_v1",
+                disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+                external_disclosure_ack=True,
+            )
+            canonical = admit_inline_request(
+                question=request.question,
+                sources=[source.model_dump() for source in request.sources],
+                disclosure_profile=request.disclosure_profile,
+                disclosure_notice_digest=request.disclosure_notice_digest,
+                external_disclosure_ack=request.external_disclosure_ack,
+            )
+            brief = EvidenceBrief(
+                answer="Grounded answer.", citations=[], uncertainties=[], next_decisions=[]
+            )
+            response = {
+                **brief.model_dump(mode="json"),
+                "request_digest": canonical.request_digest,
+                "workflow_id": workflow_id,
+                "markdown": "# Evidence brief\n",
+                "provider_audit": provider_audit(
+                    brief, workflow_id=workflow_id, request_digest=canonical.request_digest
+                ).model_dump(mode="json"),
+            }
+            enqueue = AsyncMock(
+                return_value=SimpleNamespace(get_result=AsyncMock(return_value=response))
+            )
+            with (
+                patch("glupta_agi.api.crawl_observe_queue.enqueue_async", new=enqueue),
+                patch(
+                    "glupta_agi.api.DBOS.get_workflow_status_async",
+                    new=AsyncMock(
+                        return_value=SimpleNamespace(
+                            input={"args": [canonical.workflow_payload()]}
+                        )
+                    ),
+                ),
+            ):
+                result = await evidence_brief(
+                    request=request,
+                    authorization=f"Bearer {token}",
+                    idempotency_key=workflow_id,
+                    settings=Settings(
+                        input_root=root,
+                        token=token,
+                        release_profile=profile,
+                        release_profile_digest=profile.digest(),
+                        codex_home=home,
+                        auth_generation=profile.auth_generation,
+                    ),
+                )
+
+        self.assertEqual(result.request_digest, canonical.request_digest)
+        self.assertEqual(enqueue.await_args.args[0], evidence_brief_workflow)
+        self.assertEqual(enqueue.await_args.args[1], canonical.workflow_payload())
+        self.assertEqual(enqueue.await_args.args[1]["sources"][0]["content"], content)
+
+    async def test_header_rejections_release_request_auth_settings_and_id_locals(self) -> None:
+        source_marker = "REJECTED_INLINE_SOURCE_MARKER"
+        valid_token = "VALID_SETTINGS_TOKEN_" + "v" * 32
+        bad_authorization = "REJECTED_AUTHORIZATION_" + "a" * 32
+        invalid_id = "invalid-uuidv7-" + "i" * 32
+        valid_id = "01a011ce-66e7-70d0-94ca-d49cd9977083"
+        request = EvidenceBriefInlineRequest(
+            question="q",
+            sources=[{"path": "source.md", "content": source_marker}],
+            disclosure_profile="external_disclosed_v1",
+            disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+            external_disclosure_ack=True,
+        )
+        cases = (
+            (f"Bearer {bad_authorization}", valid_id, 401, "invalid bearer capability",
+             (source_marker, bad_authorization, valid_token)),
+            (f"Bearer {valid_token}", invalid_id, 400, "invalid Idempotency-Key",
+             (source_marker, valid_token, invalid_id)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for authorization, idempotency_key, code, detail, markers in cases:
+                with (
+                    self.subTest(code=code),
+                    patch("glupta_agi.api.crawl_observe_queue.enqueue_async") as enqueue,
+                ):
+                    try:
+                        await evidence_brief(
+                            request=request,
+                            authorization=authorization,
+                            idempotency_key=idempotency_key,
+                            settings=Settings(input_root=Path(directory), token=valid_token),
+                        )
+                    except HTTPException as error:
+                        caught = error
+                    else:
+                        self.fail("expected HTTPException")
+                self.assertEqual(caught.status_code, code)
+                self.assertEqual(caught.detail, detail)
+                _assert_public_error_sanitized(self, caught, *markers)
+                enqueue.assert_not_called()
 
     async def test_workflow_failures_release_public_secret_and_payload_locals(self) -> None:
         workflow_id = "01a011ce-66e7-70d0-94ca-d49cd9977081"

@@ -8,7 +8,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefRequest
+from glupta_agi.contracts import (
+    DISCLOSURE_NOTICE_DIGEST,
+    EvidenceBriefInlineRequest,
+    EvidenceBriefRequest,
+)
 from glupta_agi.intake import IntakeError, load_request, validate_workflow_payload
 
 
@@ -35,7 +39,7 @@ class IntakeTests(unittest.TestCase):
         )
         self.assertEqual(one.request_digest, two.request_digest)
         self.assertEqual(one.question, "What changed?")
-        self.assertEqual(one.sources[0].lines, ("alpha", "beta"))
+        self.assertEqual(tuple(one.sources[0].content.splitlines()), ("alpha", "beta"))
 
     def test_removed_artifact_option_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):
@@ -50,6 +54,24 @@ class IntakeTests(unittest.TestCase):
                 }
             )
 
+    def test_inline_http_schema_is_strict_and_forbids_path_request_fields(self) -> None:
+        request = {
+            "question": "q",
+            "sources": [{"path": "notes/facts.md", "content": "approved bytes"}],
+            "disclosure_profile": "external_disclosed_v1",
+            "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+            "external_disclosure_ack": True,
+        }
+        validated = EvidenceBriefInlineRequest.model_validate(request)
+        self.assertEqual(validated.sources[0].content, "approved bytes")
+        for mutation in (
+            {**request, "files": ["notes/facts.md"]},
+            {**request, "sources": [{**request["sources"][0], "sha256": "0" * 64}]},
+            {**request, "sources": [{"path": "notes/facts.md", "content": 1}]},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(ValidationError):
+                EvidenceBriefInlineRequest.model_validate(mutation)
+
     def test_disclosure_profile_is_bound_for_durable_replay(self) -> None:
         canonical = load_request(
             input_root=self.root,
@@ -60,12 +82,12 @@ class IntakeTests(unittest.TestCase):
             **canonical.workflow_payload(),
         }
 
-        self.assertTrue(canonical.matches_recorded_payload(recorded))
-        self.assertFalse(
-            canonical.matches_recorded_payload({**recorded, "disclosure_profile": "local_only"})
+        self.assertEqual(recorded, canonical.workflow_payload())
+        self.assertNotEqual(
+            {**recorded, "disclosure_profile": "local_only"}, canonical.workflow_payload()
         )
-        self.assertFalse(
-            canonical.matches_recorded_payload({**recorded, "external_disclosure_ack": False})
+        self.assertNotEqual(
+            {**recorded, "external_disclosure_ack": False}, canonical.workflow_payload()
         )
         with self.assertRaisesRegex(IntakeError, "acknowledgement"):
             load_request(

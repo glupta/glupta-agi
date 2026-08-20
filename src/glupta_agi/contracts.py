@@ -5,34 +5,44 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import BaseModel, Field, StrictInt, model_validator
 
 DISCLOSURE_NOTICE = (
     "The selected source bytes and question will be sent to the OpenAI Codex service "
     "using the approved ChatGPT subscription."
 )
 DISCLOSURE_NOTICE_DIGEST = hashlib.sha256(DISCLOSURE_NOTICE.encode()).hexdigest()
+AUDIT_SCHEMA = "crawl-codex-subscription-audit-v1"
 
 
-class EvidenceBriefRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class _DisclosureRequest(BaseModel, extra="forbid"):
     question: str = Field(min_length=1, max_length=32_768)
-    files: list[str] = Field(min_length=1, max_length=20)
     disclosure_profile: Literal["external_disclosed_v1"]
     disclosure_notice_digest: str = Field(pattern=f"^{DISCLOSURE_NOTICE_DIGEST}$")
     external_disclosure_ack: Literal[True]
 
 
-class Citation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class EvidenceBriefRequest(_DisclosureRequest):
+    files: list[str] = Field(min_length=1, max_length=20)
+
+
+class InlineSource(BaseModel, extra="forbid", strict=True):
+    path: str
+    content: str
+
+
+class EvidenceBriefInlineRequest(_DisclosureRequest, strict=True):
+    sources: list[InlineSource] = Field(min_length=1, max_length=20)
+
+
+class Citation(BaseModel, extra="forbid"):
     path: str
     line_start: StrictInt = Field(ge=1)
     line_end: StrictInt = Field(ge=1)
     quote: str = Field(min_length=1)
 
 
-class EvidenceBrief(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class EvidenceBrief(BaseModel, extra="forbid"):
     answer: str = Field(min_length=1)
     citations: list[Citation]
     uncertainties: list[str]
@@ -44,11 +54,8 @@ def canonical_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-class ProviderAudit(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["crawl-codex-subscription-audit-v1"] = (
-        "crawl-codex-subscription-audit-v1"
-    )
+class ProviderAudit(BaseModel, extra="forbid", frozen=True):
+    schema_version: Literal[AUDIT_SCHEMA] = AUDIT_SCHEMA
     workflow_id: str
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     release_profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -76,16 +83,13 @@ class ProviderAudit(BaseModel):
 
 
 def provider_record_digest(brief: EvidenceBrief, audit: ProviderAudit) -> str:
-    return canonical_digest(
-        {
-            "result": brief.model_dump(mode="json"),
-            "audit": audit.model_dump(mode="json", exclude={"record_digest"}),
-        }
-    )
+    return canonical_digest({
+        "result": brief.model_dump(mode="json"),
+        "audit": audit.model_dump(mode="json", exclude={"record_digest"}),
+    })
 
 
-class ProviderResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class ProviderResult(BaseModel, extra="forbid", frozen=True):
     brief: EvidenceBrief
     audit: ProviderAudit
 
@@ -94,9 +98,8 @@ def validate_provider_record(record: ProviderResult) -> ProviderResult:
     from .inference import ALLOWED_PLANS, PINNED_EFFORT, PINNED_MODEL
 
     audit = record.audit
-    digest = canonical_digest(record.brief.model_dump(mode="json"))
     if (
-        audit.validated_result_digest != digest
+        audit.validated_result_digest != canonical_digest(record.brief.model_dump(mode="json"))
         or audit.record_digest != provider_record_digest(record.brief, audit)
         or audit.subscription_plan not in ALLOWED_PLANS
         or audit.requested_model != PINNED_MODEL
@@ -117,16 +120,11 @@ class EvidenceBriefResponse(EvidenceBrief):
 
     @model_validator(mode="after")
     def bound_provider_record(self) -> EvidenceBriefResponse:
-        brief = EvidenceBrief(
-            answer=self.answer,
-            citations=self.citations,
-            uncertainties=self.uncertainties,
-            next_decisions=self.next_decisions,
+        brief = EvidenceBrief.model_validate(
+            self.model_dump(include=set(EvidenceBrief.model_fields))
         )
         record = validate_provider_record(ProviderResult(brief=brief, audit=self.provider_audit))
-        if (
-            record.audit.workflow_id != self.workflow_id
-            or record.audit.request_digest != self.request_digest
-        ):
+        if (record.audit.workflow_id != self.workflow_id
+                or record.audit.request_digest != self.request_digest):
             raise ValueError("provider audit does not match the public result")
         return self

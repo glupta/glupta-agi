@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import BaseModel, Field, StrictInt, model_validator
 
 from .contracts import DISCLOSURE_NOTICE_DIGEST, ProviderResult, canonical_digest
 
@@ -13,8 +13,7 @@ SDK_VERSION = RUNTIME_VERSION = "0.147.0"
 ALLOWED_PLANS = frozenset({"plus", "pro", "prolite", "team", "business", "enterprise", "edu"})
 
 
-class ReleaseProfile(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class ReleaseProfile(BaseModel, extra="forbid", frozen=True):
     schema_version: Literal["crawl-codex-subscription-release-v1"]
     disclosure_profile: Literal["external_disclosed_v1"]
     provider: Literal["openai"]
@@ -73,8 +72,7 @@ class ReleaseProfile(BaseModel):
         return self.auth_expires_at > checked_at and self.evidence_expires_at > checked_at
 
 
-class FrozenDispatch(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class FrozenDispatch(BaseModel, extra="forbid", frozen=True):
     schema_version: Literal["crawl-codex-subscription-dispatch-v1"] = (
         "crawl-codex-subscription-dispatch-v1"
     )
