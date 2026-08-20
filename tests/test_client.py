@@ -259,7 +259,7 @@ class ClientTests(unittest.TestCase):
                 response_marker.encode() * (MAX_RESPONSE_BYTES // len(response_marker) + 1)),
              "server response exceeds the client limit"),
             (lambda *_a, **_k: _Response(response_marker.encode()),
-             "server returned an invalid evidence brief"),
+             "server returned an invalid response"),
             (lambda *_a, **_k: _Response(mismatched),
              "server returned a mismatched workflow result"),
         )
@@ -296,7 +296,7 @@ class ClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             token = self._token(Path(temporary))
             tampered = {**valid, "provider_audit": {**valid["provider_audit"], "response_id": "x"}}
-            with self.assertRaisesRegex(ClientError, "invalid evidence brief"):
+            with self.assertRaisesRegex(ClientError, "invalid response"):
                 submit(
                     "q", ["one.md"], "http://127.0.0.1:8765", token, workflow_id,
                     external_disclosure_ack=True,

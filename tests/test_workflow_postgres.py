@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import uuid
 from datetime import UTC, datetime
@@ -14,7 +16,8 @@ from glupta_agi.codex_adapter import ProviderAmbiguousError
 from glupta_agi.contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBrief
 from glupta_agi.effects import AmbiguousEffectError
 from glupta_agi.intake import admit_inline_request, validate_workflow_payload
-from tests.helpers import provider_audit, release_profile
+from glupta_agi.walk import WalkArtifact
+from tests.helpers import provider_audit, release_profile, walk_release_profile
 
 _DATABASE_URL = os.environ.get("GLUPTA_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -46,6 +49,28 @@ def _packet() -> workflow._CrawlModelPacket:
         admitted_at=datetime.now(UTC),
         workflow_id=str(uuid.uuid4()),
     )
+
+
+def _walk_packet(workflow_id: str) -> workflow._WalkModelPacket:
+    profile = walk_release_profile()
+    content = "grounded fact"
+    artifact = WalkArtifact.model_validate({
+        "schema_version": "glupta-walk-request-artifact-v1",
+        "workflow_family": "walk_state_synthesis_v1",
+        "question": "question", "decision_owner": "Akshay",
+        "deliverable_type": None, "expected_disposition": None,
+        "disclosure_profile": "external_disclosed_v1",
+        "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+        "external_disclosure_ack": True, "release_profile_digest": profile.digest(),
+        "sources": [{"path": "source.md", "content": content,
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "byte_size": len(content)}]})
+    raw = json.dumps(artifact.model_dump(mode="json"), separators=(",", ":"),
+        sort_keys=True).encode()
+    admitted = artifact.admit(hashlib.sha256(raw).hexdigest())
+    return workflow._WalkModelPacket(admitted_request=admitted.workflow_payload(),
+        release_profile=profile, codex_home="/private/codex", auth_generation=1,
+        admitted_at=datetime.now(UTC), workflow_id=workflow_id)
 
 
 def _prime_dispatch(packet: workflow._CrawlModelPacket, *, phase: str | None = None):
@@ -231,4 +256,14 @@ def test_subscription_ambiguity_is_sticky_and_never_redispatches() -> None:
     assert recorded.hold_reason == "provider_outcome_ambiguous"
     assert adapter.calls == 1
     _assert_replay_does_not_dispatch(packet, AmbiguousEffectError)
-    assert adapter.calls == 1
+
+
+def test_crawl_and_walk_cannot_share_a_workflow_effect_identity() -> None:
+    crawl = _packet()
+    dispatch, _audit = _prime_dispatch(crawl)
+    with pytest.raises(workflow.BriefGenerationError,
+            match="recorded model effect conflicts with request"):
+        asyncio.run(workflow._run_inference(_walk_packet(crawl.workflow_id),
+            adapter_factory=lambda *_a, **_k: pytest.fail("cross-stage collision dispatched")))
+    recorded = effects.reserve(dispatch.model_dump(mode="json"), dispatch.digest())
+    assert recorded.dispatch["schema_version"] == "crawl-codex-subscription-dispatch-v1"

@@ -8,7 +8,8 @@ import sqlalchemy as sa
 from dbos import SQLAlchemyDatasource
 
 from .contracts import ProviderResult, validate_provider_record
-from .inference import FrozenDispatch
+from .inference import FrozenDispatch, SubscriptionDispatch, WalkFrozenDispatch
+from .walk import WalkProviderResult, validate_walk_record
 
 
 class AmbiguousEffectError(RuntimeError):
@@ -139,7 +140,10 @@ def _effect(row: dict[str, Any]) -> Effect:
         raise RuntimeError("external effect row violates the single-call Crawl contract")
     invalid_dispatch = False
     try:
-        frozen = FrozenDispatch.model_validate(dispatch)
+        dispatch_type: type[SubscriptionDispatch] = (WalkFrozenDispatch
+            if dispatch.get("schema_version") == "walk-codex-subscription-dispatch-v1"
+            else FrozenDispatch)
+        frozen = dispatch_type.model_validate(dispatch)
     except ValueError:
         invalid_dispatch = True
     if invalid_dispatch:
@@ -157,9 +161,10 @@ def _effect(row: dict[str, Any]) -> Effect:
     if str(row.get("state")) == "reconciled":
         invalid_record = False
         try:
-            record = validate_provider_record(
-                ProviderResult.model_validate({"brief": result, "audit": audit})
-            )
+            record = (validate_walk_record(WalkProviderResult.model_validate(
+                {"output": result, "audit": audit})) if isinstance(frozen, WalkFrozenDispatch)
+                else validate_provider_record(ProviderResult.model_validate(
+                    {"brief": result, "audit": audit})))
         except ValueError:
             invalid_record = True
         if invalid_record:
@@ -178,6 +183,10 @@ def _effect(row: dict[str, Any]) -> Effect:
             provider_audit.input_tokens > frozen.max_observed_input_tokens,
             provider_audit.output_tokens > frozen.max_observed_output_tokens,
             provider_audit.reasoning_tokens > frozen.max_observed_reasoning_tokens,
+            isinstance(frozen, WalkFrozenDispatch) and (
+                getattr(provider_audit, "workflow_family", None) != frozen.workflow_family
+                or getattr(provider_audit, "result_schema_digest", None)
+                != frozen.result_schema_digest),
         )
         if any(invalid):
             raise RuntimeError("external effect result and audit do not match")
