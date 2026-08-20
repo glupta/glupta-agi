@@ -1,26 +1,35 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
 from dbos import DBOS, SetWorkflowID
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from starlette.responses import Response
 
 from . import __version__
-from .contracts import EvidenceBriefRequest, EvidenceBriefResponse
+from .contracts import EvidenceBriefInlineRequest, EvidenceBriefRequest, EvidenceBriefResponse
 from .effects import AmbiguousEffectError
-from .intake import IntakeError, load_request
+from .intake import CanonicalRequest, IntakeError, admit_inline_request, load_request
 from .settings import Settings, get_settings
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
 app = FastAPI(title="glupta agi", version=__version__, docs_url=None, redoc_url=None)
 
 
+@app.exception_handler(RequestValidationError)
+async def _bounded_validation_error(request: Request, error: RequestValidationError) -> Response:
+    del request, error
+    return Response(b'{"detail":"request validation failed"}',
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, media_type="application/json")
+
+
 def _bearer(authorization: str | None, settings: Settings) -> None:
-    prefix = "Bearer "
-    if authorization is None or not authorization.startswith(prefix):
+    if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer capability")
-    if not settings.authenticates(authorization[len(prefix) :]):
+    if not settings.authenticates(authorization.removeprefix("Bearer ")):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid bearer capability")
 
 
@@ -36,66 +45,77 @@ def _workflow_id(raw: str | None) -> str:
     return raw
 
 
+async def _complete_admission(canonical: CanonicalRequest, workflow_id: str, settings: Settings):
+    try:
+        payload = canonical.workflow_payload()
+        with SetWorkflowID(workflow_id):
+            profile, codex_home, auth_generation = settings.require_external_profile()
+            handle = await crawl_observe_queue.enqueue_async(
+                evidence_brief_workflow, payload, workflow_id,
+                profile.model_dump(mode="json"), str(codex_home), auth_generation,
+                datetime.now(UTC).isoformat(),
+            )
+        recorded = await DBOS.get_workflow_status_async(workflow_id)
+        recorded_args = recorded.input["args"] if recorded is not None and recorded.input else ()
+        if not recorded_args or not isinstance(recorded_args[0], dict):
+            return status.HTTP_503_SERVICE_UNAVAILABLE, "workflow input unavailable"
+        if recorded_args[0] != canonical.workflow_payload():
+            return status.HTTP_409_CONFLICT, "Idempotency-Key already binds other input"
+        return EvidenceBriefResponse.model_validate(await handle.get_result())
+    except asyncio.CancelledError:
+        return None
+    except (AmbiguousEffectError, BriefGenerationError) as exc:
+        code = (status.HTTP_503_SERVICE_UNAVAILABLE if isinstance(exc, AmbiguousEffectError)
+                else status.HTTP_502_BAD_GATEWAY)
+        return code, str(exc)
+    except Exception:
+        return status.HTTP_500_INTERNAL_SERVER_ERROR, "evidence brief unavailable"
+
+
 @app.get("/healthz")
 async def health() -> dict[str, str]:
-    return {
-        "status": "healthy",
-        "stage": "Crawl",
-        "actions": "disabled",
-        "inference": "external_disclosed_v1",
-    }
+    return dict(status="healthy", stage="Crawl", actions="disabled",
+                inference="external_disclosed_v1")
 
 
 @app.post("/v1/evidence-brief", response_model=EvidenceBriefResponse)
 async def evidence_brief(
-    request: EvidenceBriefRequest,
+    request: EvidenceBriefRequest | EvidenceBriefInlineRequest,
     authorization: str | None = Header(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     settings: Settings = Depends(get_settings),  # noqa: B008 -- FastAPI dependency marker
 ) -> EvidenceBriefResponse:
-    _bearer(authorization, settings)
-    workflow_id = _workflow_id(idempotency_key)
+    header_error = None
     try:
-        canonical = load_request(
-            input_root=settings.input_root,
-            question=request.question,
-            selected_paths=request.files,
-            disclosure_profile=request.disclosure_profile,
-            disclosure_notice_digest=request.disclosure_notice_digest,
-            external_disclosure_ack=request.external_disclosure_ack,
-        )
+        _bearer(authorization, settings)
+        workflow_id = _workflow_id(idempotency_key)
+    except HTTPException as exc:
+        header_error = exc.status_code, str(exc.detail)
+    if header_error is not None:
+        del request, authorization, idempotency_key, settings
+        raise HTTPException(header_error[0], header_error[1]) from None
+    del authorization, idempotency_key
+    intake_error = None
+    try:
+        common = request.model_dump(exclude={"files", "sources"})
+        if isinstance(request, EvidenceBriefInlineRequest):
+            canonical = admit_inline_request(
+                sources=[source.model_dump() for source in request.sources], **common
+            )
+        else:
+            canonical = load_request(
+                input_root=settings.input_root, selected_paths=request.files, **common
+            )
     except IntakeError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+        intake_error = status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)
+    if intake_error is not None:
+        del request, settings, workflow_id, common
+        raise HTTPException(intake_error[0], intake_error[1]) from None
 
-    payload = canonical.workflow_payload()
-    with SetWorkflowID(workflow_id):
-        profile, codex_home, auth_generation = settings.require_external_profile()
-        handle = await crawl_observe_queue.enqueue_async(
-            evidence_brief_workflow,
-            payload,
-            workflow_id,
-            profile.model_dump(mode="json"),
-            str(codex_home),
-            auth_generation,
-            datetime.now(UTC).isoformat(),
-        )
-
-    recorded = await DBOS.get_workflow_status_async(workflow_id)
-    recorded_args = recorded.input["args"] if recorded is not None and recorded.input else ()
-    if not recorded_args or not isinstance(recorded_args[0], dict):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "workflow input unavailable")
-    if not canonical.matches_recorded_payload(recorded_args[0]):
-        raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency-Key already binds other input")
-
-    error: tuple[int, str] | None = None
-    try:
-        result = await handle.get_result()
-    except AmbiguousEffectError as exc:
-        error = status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)
-    except BriefGenerationError as exc:
-        error = status.HTTP_502_BAD_GATEWAY, str(exc)
-    if error is not None:
-        del request, authorization, idempotency_key, settings, workflow_id, canonical, payload
-        del profile, codex_home, auth_generation, handle, recorded, recorded_args
-        raise HTTPException(error[0], error[1]) from None
-    return EvidenceBriefResponse.model_validate(result)
+    outcome = await _complete_admission(canonical, workflow_id, settings)
+    del request, settings, workflow_id, canonical, common
+    if outcome is None:
+        raise asyncio.CancelledError from None
+    if isinstance(outcome, tuple):
+        raise HTTPException(outcome[0], outcome[1]) from None
+    return outcome

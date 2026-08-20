@@ -30,6 +30,7 @@ class ReleaseBoundaryTests(TestCase):
     def test_package_runtime_api_and_dbos_share_one_version_identity(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
+        self.assertEqual(project["project"]["version"], "0.4.4")
         self.assertEqual(project["project"]["version"], __version__)
         self.assertEqual(metadata("glupta-agi")["Version"], __version__)
         self.assertNotIn(__version__, (SOURCE / "__init__.py").read_text(encoding="utf-8"))

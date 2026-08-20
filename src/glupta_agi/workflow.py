@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dbos import DBOS, Queue
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 
 from . import codex_adapter, contracts
 from .brief import SYSTEM_PROMPT, build_user_prompt, render_markdown, resolve_citations
@@ -20,13 +20,11 @@ class BriefGenerationError(RuntimeError):
     pass
 
 
-class AmbiguousResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+class AmbiguousResult(BaseModel, extra="forbid", frozen=True, strict=True):
     kind: Literal["unknown"]
 
 
-class _CrawlModelPacket(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class _CrawlModelPacket(BaseModel, extra="forbid", frozen=True):
     admitted_request: dict[str, Any]
     release_profile: ReleaseProfile
     codex_home: str

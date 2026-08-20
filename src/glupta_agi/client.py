@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import secrets
@@ -16,7 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .contracts import DISCLOSURE_NOTICE_DIGEST, EvidenceBriefResponse
-from .intake import IntakeError, _validate_relative_path
+from .intake import CanonicalRequest, IntakeError, _validate_relative_path
 
 MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_SECONDS = 2 * 1024 * 1024, 330
 
@@ -44,8 +45,6 @@ def _read_capability(path: Path) -> str:
         with os.fdopen(file_fd, encoding="utf-8") as capability_file:
             file_fd = -1
             capability = capability_file.read(4097).strip()
-    except ClientError:
-        raise
     except (OSError, UnicodeError):
         unavailable = True
     finally:
@@ -89,9 +88,16 @@ def _workflow_id(raw: str | None) -> str:
     return candidate
 
 
-def _request_payload(question: str, files: Sequence[str], *,
-                     external_disclosure_ack: bool) -> bytes:
-    if not external_disclosure_ack:
+def _disclosure_payload(question: str, selection: dict[str, object]) -> bytes:
+    body = {
+        "question": question, **selection, "disclosure_profile": "external_disclosed_v1",
+        "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+        "external_disclosure_ack": True}
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _request_payload(question: str, files: Sequence[str], *, ack: bool) -> bytes:
+    if ack is not True:
         raise ClientError("external disclosure acknowledgement is required")
     normalized_question = question.strip()
     if not normalized_question or len(normalized_question.encode()) > 32 * 1024:
@@ -99,67 +105,76 @@ def _request_payload(question: str, files: Sequence[str], *,
     if not files or len(files) > 20 or len(set(files)) != len(files):
         raise ClientError("select between 1 and 20 unique source files")
     try:
-        for path in files:
-            _validate_relative_path(path)
+        tuple(_validate_relative_path(path) for path in files)
     except IntakeError as exc:
         raise ClientError(str(exc)) from None
-    return json.dumps(
-        {
-            "question": normalized_question,
-            "files": list(files),
-            "disclosure_profile": "external_disclosed_v1",
-            "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
-            "external_disclosure_ack": True,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()
+    return _disclosure_payload(normalized_question, {"files": list(files)})
 
 
-def submit(
-    question: str,
-    files: Sequence[str],
-    endpoint: str,
-    token_file: Path,
-    idempotency_key: str | None = None,
-    *,
-    external_disclosure_ack: bool = False,
-    opener: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
+def _submit_payload(payload: bytes, endpoint: str, token_file: Path, idempotency_key: str | None,
+                    opener: Callable[..., Any] | None) -> dict[str, Any]:
     base_url = _validate_endpoint(endpoint)
     workflow_id = _workflow_id(idempotency_key)
-    payload = _request_payload(question, files, external_disclosure_ack=external_disclosure_ack)
     capability = _read_capability(token_file)
+    headers = {"Authorization": f"Bearer {capability}", "Content-Type": "application/json",
+               "Idempotency-Key": workflow_id}
     request = urllib.request.Request(  # noqa: S310 -- URL is validated loopback HTTP
-        f"{base_url}/v1/evidence-brief", data=payload,
-        headers={"Authorization": f"Bearer {capability}", "Content-Type": "application/json",
-                 "Idempotency-Key": workflow_id}, method="POST")
-    http_code, transport_failed = None, False
+        f"{base_url}/v1/evidence-brief", data=payload, headers=headers, method="POST")
+    failure = None
     try:
-        with (opener or urllib.request.build_opener(
-                urllib.request.ProxyHandler({}), _NoRedirect()).open)(
-                request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        open_request = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirect()).open
+        with open_request(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        http_code = exc.code
-    except (urllib.error.URLError, TimeoutError, OSError):
-        transport_failed = True
-    if http_code is not None:
-        raise ClientError(f"server returned HTTP {http_code} for workflow {workflow_id}") from None
-    if transport_failed:
-        raise ClientError("Crawl API is unavailable") from None
+        failure = f"server returned HTTP {exc.code} for workflow {workflow_id}"
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
+        failure = "Crawl API is unavailable"
+    del payload, capability, headers, request, open_request
+    if failure is not None:
+        raise ClientError(failure) from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise ClientError("server response exceeds the client limit")
-    invalid_response = False
     try:
         result = EvidenceBriefResponse.model_validate_json(body)
     except ValueError:
-        invalid_response = True
-    if invalid_response:
         raise ClientError("server returned an invalid evidence brief") from None
     if result.workflow_id != workflow_id:
         raise ClientError("server returned a mismatched workflow result")
     return result.model_dump(mode="json")
+
+
+def submit(question: str, files: Sequence[str], endpoint: str, token_file: Path,
+           idempotency_key: str | None = None, *, external_disclosure_ack: bool = False,
+           opener: Callable[..., Any] | None = None) -> dict[str, Any]:
+    error = None
+    try:
+        payload = _request_payload(question, files, ack=external_disclosure_ack)
+        result = _submit_payload(payload, endpoint, token_file, idempotency_key, opener)
+    except ClientError as exc:
+        error = str(exc)
+    if error is None:
+        return result
+    question = endpoint = idempotency_key = ""
+    files, token_file, external_disclosure_ack = (), Path(), False
+    opener, payload = None, b""
+    raise ClientError(error) from None
+
+
+def submit_inline(canonical: CanonicalRequest, endpoint: str, token_file: Path,
+                  idempotency_key: str | None = None, *,
+                  opener: Callable[..., Any] | None = None) -> dict[str, Any]:
+    sources = [{"path": source.path, "content": source.content} for source in canonical.sources]
+    payload = _disclosure_payload(canonical.question, {"sources": sources})
+    error = None
+    try:
+        result = _submit_payload(payload, endpoint, token_file, idempotency_key, opener)
+    except ClientError as exc:
+        error = str(exc)
+    del canonical, sources, payload
+    if error is not None:
+        raise ClientError(error) from None
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -178,14 +193,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = submit(
-            args.question,
-            args.files,
-            args.endpoint,
-            args.token_file,
-            args.idempotency_key,
-            external_disclosure_ack=args.ack_external_disclosure,
-        )
+        result = submit(args.question, args.files, args.endpoint, args.token_file,
+                        args.idempotency_key, external_disclosure_ack=args.ack_external_disclosure)
     except ClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
