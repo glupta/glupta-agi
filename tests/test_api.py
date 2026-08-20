@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import traceback
 import unittest
@@ -11,8 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
 from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 
-from glupta_agi.api import evidence_brief
+from glupta_agi.api import app, evidence_brief
 from glupta_agi.contracts import (
     DISCLOSURE_NOTICE_DIGEST,
     EvidenceBrief,
@@ -21,7 +23,7 @@ from glupta_agi.contracts import (
 )
 from glupta_agi.effects import AmbiguousEffectError
 from glupta_agi.intake import admit_inline_request, load_request
-from glupta_agi.settings import Settings
+from glupta_agi.settings import Settings, get_settings
 from glupta_agi.workflow import BriefGenerationError, evidence_brief_workflow
 from tests.helpers import codex_home, provider_audit, release_profile
 
@@ -56,6 +58,96 @@ def _assert_public_error_sanitized(
 
 
 class EvidenceBriefApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_union_and_non_utf8_inline_text_are_bounded_before_effects(self) -> None:
+        source_marker = "REJECTED_ASGI_SOURCE_MARKER"
+        token_marker = "REJECTED_ASGI_TOKEN_MARKER_" + "t" * 32
+        common = {
+            "question": "What is grounded?",
+            "disclosure_profile": "external_disclosed_v1",
+            "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+            "external_disclosure_ack": True,
+        }
+        cases = (
+            (
+                {
+                    **common,
+                    "files": ["source.md"],
+                    "sources": [{"path": "source.md", "content": source_marker}],
+                },
+                "request validation failed",
+            ),
+            (
+                {
+                    **common,
+                    "sources": [{"path": "source.md", "content": source_marker + "\ud800"}],
+                },
+                "request text is not valid UTF-8",
+            ),
+        )
+        app.dependency_overrides[get_settings] = lambda: Settings(
+            input_root=Path("/not-used"), token=token_marker
+        )
+        try:
+            for body, detail in cases:
+                with (
+                    self.subTest(body_keys=sorted(body)),
+                    patch("glupta_agi.api.crawl_observe_queue.enqueue_async") as enqueue,
+                    patch("glupta_agi.api.DBOS.get_workflow_status_async") as workflow_status,
+                    patch(
+                        "glupta_agi.workflow.codex_adapter.CodexSubscriptionAdapter.generate"
+                    ) as provider,
+                ):
+                    async with AsyncClient(
+                        transport=ASGITransport(app=app), base_url="http://test"
+                    ) as client:
+                        response = await client.post(
+                            "/v1/evidence-brief",
+                            content=json.dumps(body, ensure_ascii=True),
+                            headers={
+                                "content-type": "application/json",
+                                "authorization": f"Bearer {token_marker}",
+                                "idempotency-key": "01a011ce-66e7-70d0-94ca-d49cd9977089",
+                            },
+                        )
+
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json(), {"detail": detail})
+                for marker in (source_marker, token_marker):
+                    self.assertNotIn(marker, response.text)
+                enqueue.assert_not_called()
+                workflow_status.assert_not_called()
+                provider.assert_not_called()
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+    async def test_non_utf8_inline_intake_releases_sensitive_exception_state(self) -> None:
+        source_marker = "REJECTED_INLINE_UTF8_SOURCE_MARKER"
+        token_marker = "REJECTED_INLINE_UTF8_TOKEN_MARKER_" + "t" * 32
+        request = EvidenceBriefInlineRequest(
+            question="What is grounded?",
+            sources=[{"path": "source.md", "content": source_marker + "\ud800"}],
+            disclosure_profile="external_disclosed_v1",
+            disclosure_notice_digest=DISCLOSURE_NOTICE_DIGEST,
+            external_disclosure_ack=True,
+        )
+        with patch("glupta_agi.api.crawl_observe_queue.enqueue_async") as enqueue:
+            try:
+                await evidence_brief(
+                    request=request,
+                    authorization=f"Bearer {token_marker}",
+                    idempotency_key="01a011ce-66e7-70d0-94ca-d49cd9977089",
+                    settings=Settings(input_root=Path("/not-used"), token=token_marker),
+                )
+            except HTTPException as exc:
+                caught = exc
+            else:
+                self.fail("non-UTF-8 inline text reached admission")
+
+        self.assertEqual(caught.status_code, 422)
+        self.assertEqual(caught.detail, "request text is not valid UTF-8")
+        _assert_public_error_sanitized(self, caught, source_marker, token_marker)
+        enqueue.assert_not_called()
+
     async def test_admission_enqueues_the_root_on_the_bounded_dbos_queue(self) -> None:
         workflow_id = "01a011ce-66e7-70d0-94ca-d49cd9977081"
         token = "t" * 32

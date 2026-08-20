@@ -50,14 +50,9 @@ class ReleaseProfile(BaseModel, extra="forbid", frozen=True):
     @model_validator(mode="after")
     def fixed_policy(self) -> ReleaseProfile:
         expected = (262_144, 270_000, 8_000, 8_000, 300, 300)
-        observed = (
-            self.max_input_bytes,
-            self.max_observed_input_tokens,
-            self.max_observed_output_tokens,
-            self.max_observed_reasoning_tokens,
-            self.queue_timeout_seconds,
-            self.wall_timeout_seconds,
-        )
+        observed = (self.max_input_bytes, self.max_observed_input_tokens,
+                    self.max_observed_output_tokens, self.max_observed_reasoning_tokens,
+                    self.queue_timeout_seconds, self.wall_timeout_seconds)
         if self.subscription_plan not in ALLOWED_PLANS or observed != expected:
             raise ValueError("release profile violates the frozen Crawl policy")
         if self.auth_expires_at.tzinfo is None or self.evidence_expires_at.tzinfo is None:
@@ -74,8 +69,7 @@ class ReleaseProfile(BaseModel, extra="forbid", frozen=True):
 
 class FrozenDispatch(BaseModel, extra="forbid", frozen=True):
     schema_version: Literal["crawl-codex-subscription-dispatch-v1"] = (
-        "crawl-codex-subscription-dispatch-v1"
-    )
+        "crawl-codex-subscription-dispatch-v1")
     workflow_id: str
     slot_id: Literal["model-0"] = "model-0"
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")

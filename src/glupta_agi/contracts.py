@@ -9,8 +9,7 @@ from pydantic import BaseModel, Field, StrictInt, model_validator
 
 DISCLOSURE_NOTICE = (
     "The selected source bytes and question will be sent to the OpenAI Codex service "
-    "using the approved ChatGPT subscription."
-)
+    "using the approved ChatGPT subscription.")
 DISCLOSURE_NOTICE_DIGEST = hashlib.sha256(DISCLOSURE_NOTICE.encode()).hexdigest()
 AUDIT_SCHEMA = "crawl-codex-subscription-audit-v1"
 
@@ -83,10 +82,9 @@ class ProviderAudit(BaseModel, extra="forbid", frozen=True):
 
 
 def provider_record_digest(brief: EvidenceBrief, audit: ProviderAudit) -> str:
-    return canonical_digest({
-        "result": brief.model_dump(mode="json"),
-        "audit": audit.model_dump(mode="json", exclude={"record_digest"}),
-    })
+    return canonical_digest({"result": brief.model_dump(mode="json"),
+                             "audit": audit.model_dump(mode="json",
+                                                       exclude={"record_digest"})})
 
 
 class ProviderResult(BaseModel, extra="forbid", frozen=True):
@@ -121,8 +119,7 @@ class EvidenceBriefResponse(EvidenceBrief):
     @model_validator(mode="after")
     def bound_provider_record(self) -> EvidenceBriefResponse:
         brief = EvidenceBrief.model_validate(
-            self.model_dump(include=set(EvidenceBrief.model_fields))
-        )
+            self.model_dump(include=set(EvidenceBrief.model_fields)))
         record = validate_provider_record(ProviderResult(brief=brief, audit=self.provider_audit))
         if (record.audit.workflow_id != self.workflow_id
                 or record.audit.request_digest != self.request_digest):

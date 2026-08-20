@@ -5,7 +5,9 @@ import uuid
 from datetime import UTC, datetime
 
 from dbos import DBOS, SetWorkflowID
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from starlette.responses import Response
 
 from . import __version__
 from .contracts import EvidenceBriefInlineRequest, EvidenceBriefRequest, EvidenceBriefResponse
@@ -15,6 +17,13 @@ from .settings import Settings, get_settings
 from .workflow import BriefGenerationError, crawl_observe_queue, evidence_brief_workflow
 
 app = FastAPI(title="glupta agi", version=__version__, docs_url=None, redoc_url=None)
+
+
+@app.exception_handler(RequestValidationError)
+async def _bounded_validation_error(request: Request, error: RequestValidationError) -> Response:
+    del request, error
+    return Response(b'{"detail":"request validation failed"}',
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, media_type="application/json")
 
 
 def _bearer(authorization: str | None, settings: Settings) -> None:
@@ -55,18 +64,18 @@ async def _complete_admission(canonical: CanonicalRequest, workflow_id: str, set
         return EvidenceBriefResponse.model_validate(await handle.get_result())
     except asyncio.CancelledError:
         return None
-    except AmbiguousEffectError as exc:
-        return status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)
-    except BriefGenerationError as exc:
-        return status.HTTP_502_BAD_GATEWAY, str(exc)
+    except (AmbiguousEffectError, BriefGenerationError) as exc:
+        code = (status.HTTP_503_SERVICE_UNAVAILABLE if isinstance(exc, AmbiguousEffectError)
+                else status.HTTP_502_BAD_GATEWAY)
+        return code, str(exc)
     except Exception:
         return status.HTTP_500_INTERNAL_SERVER_ERROR, "evidence brief unavailable"
 
 
 @app.get("/healthz")
 async def health() -> dict[str, str]:
-    return {"status": "healthy", "stage": "Crawl", "actions": "disabled",
-            "inference": "external_disclosed_v1"}
+    return dict(status="healthy", stage="Crawl", actions="disabled",
+                inference="external_disclosed_v1")
 
 
 @app.post("/v1/evidence-brief", response_model=EvidenceBriefResponse)

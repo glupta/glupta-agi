@@ -13,7 +13,12 @@ from glupta_agi.contracts import (
     EvidenceBriefInlineRequest,
     EvidenceBriefRequest,
 )
-from glupta_agi.intake import IntakeError, load_request, validate_workflow_payload
+from glupta_agi.intake import (
+    IntakeError,
+    admit_inline_request,
+    load_request,
+    validate_workflow_payload,
+)
 
 
 class IntakeTests(unittest.TestCase):
@@ -158,6 +163,57 @@ class IntakeTests(unittest.TestCase):
         (self.root / "bad.txt").write_bytes(b"\xff")
         with self.assertRaisesRegex(IntakeError, "UTF-8"):
             load_request(input_root=self.root, question="q", selected_paths=["bad.txt"])
+
+    def test_inline_utf8_failures_release_question_content_and_path_frames(self) -> None:
+        marker = "DIRECT_INLINE_UTF8_MARKER"
+        common = {
+            "question": "q",
+            "sources": [{"path": "source.md", "content": "content"}],
+            "disclosure_profile": "external_disclosed_v1",
+            "disclosure_notice_digest": DISCLOSURE_NOTICE_DIGEST,
+            "external_disclosure_ack": True,
+        }
+        cases = (
+            {**common, "question": marker + "\ud800"},
+            {**common, "sources": [{"path": "source.md", "content": marker + "\ud800"}]},
+            {**common, "sources": [{"path": marker + "\ud800.md", "content": "content"}]},
+            {
+                **common,
+                "sources": [
+                    {"path": "first.md", "content": marker},
+                    {"path": "second.md", "content": marker + "\ud800"},
+                ],
+            },
+        )
+        for request in cases:
+            with self.subTest(field=request):
+                try:
+                    admit_inline_request(**request)
+                except IntakeError as exc:
+                    error = exc
+                else:
+                    self.fail("invalid UTF-8 reached inline admission")
+            self.assertEqual(str(error), "request text is not valid UTF-8")
+            self.assertIsNone(error.__cause__)
+            self.assertIsNone(error.__context__)
+            captured = traceback.TracebackException.from_exception(error, capture_locals=True)
+            product_frames: list[str] = []
+            cursor = error.__traceback__
+            while cursor is not None:
+                if "/src/glupta_agi/" in cursor.tb_frame.f_code.co_filename:
+                    product_frames.append(cursor.tb_frame.f_code.co_name)
+                    captured_frame = next(
+                        frame
+                        for frame in captured.stack
+                        if frame.filename == cursor.tb_frame.f_code.co_filename
+                        and frame.lineno == cursor.tb_lineno
+                    )
+                    self.assertNotIn(marker, repr(cursor.tb_frame.f_locals))
+                    self.assertNotIn(marker, repr(captured_frame.locals))
+                cursor = cursor.tb_next
+            self.assertEqual(product_frames, ["admit_inline_request"])
+            self.assertNotIn(marker, repr(vars(error)))
+            self.assertNotIn(marker, "".join(traceback.format_exception(error)))
 
     def test_enforces_file_count_and_total_bytes(self) -> None:
         for index in range(21):

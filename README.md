@@ -39,6 +39,24 @@ and approval-helper preflight failures before they cross public traceback
 boundaries. It does not change provider dispatch, effects, budgets, retries,
 workflow topology, or any held deployment or task-drain authority.
 
+Since 0.4.3, the material incident ledger is:
+
+- **Held validation confidentiality failure:** FastAPI's default validation
+  response could include rejected inline input, while an unpaired surrogate
+  could escape admission encoding with sensitive traceback locals. The fix uses
+  FastAPI's native `RequestValidationError` hook for a fixed 422 and remints
+  inline UTF-8 failures only after the source-bearing probe returns. ASGI and
+  direct capture-locals regressions prove no enqueue, provider call, marker, or
+  exception chain; invalid input remains terminal and retry-free.
+- **Setup/build failure:** a fresh worktree invoked a host `pytest` before dev
+  extras were installed. `uv sync --frozen --all-extras` restored the locked
+  test environment; frozen/offline lock and package checks remain release gates.
+- **Runtime and rollout relevance:** no service, store, dependency, container,
+  database, deployment, restart, rollback, effect, budget, or retry behavior
+  changed. Deployment, restart, rollback, provider dispatch, task drain, and the
+  canary remain held; a future approved canary must use the exact-byte-bound
+  inline route and the same fixed 422 boundary.
+
 The source-stage package is Debian `coreutils 9.1-1`; its corresponding source
 is Debian's `coreutils_9.1.orig.tar.xz` plus `coreutils_9.1-1.debian.tar.xz` in
 the Bookworm archive. Final-image package scanners do not attribute the copied
