@@ -22,12 +22,51 @@ updates:
         update-types: [major]
     open-pull-requests-limit: 5
 
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/New_York
+    cooldown:
+      default-days: 7
+    groups:
+      actions-compatible:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      actions-majors:
+        patterns: ["*"]
+        update-types: [major]
+    open-pull-requests-limit: 5
+
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
       day: monday
       time: "06:00"
+      timezone: America/New_York
+    cooldown:
+      default-days: 7
+      semver-patch-days: 3
+      semver-minor-days: 7
+      semver-major-days: 30
+    groups:
+      compatible:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      majors:
+        patterns: ["*"]
+        update-types: [major]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:05"
       timezone: America/New_York
     cooldown:
       default-days: 7
