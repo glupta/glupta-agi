@@ -1,0 +1,14 @@
+name: Policy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  policy:
+    uses: glupta/dev-meta/.github/workflows/studio-policy.yml@cd4a9880fdceeb6e6a49464885338c4500f0f0c0
