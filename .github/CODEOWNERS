@@ -1,0 +1,4 @@
+# The principal reviews changes to the repository governance boundary.
+/.github/CODEOWNERS @glupta
+/.github/pull_request_template.md @glupta
+/.github/workflows/ @glupta
