@@ -21,5 +21,5 @@
 - Fixed checks and acceptance evidence:
 - Risk, rollback, or kill condition:
 
-The `policy-reviewed` label is applied only after a trusted reviewer verifies
-this evidence and the exact proposed change.
+Every new push removes `policy-reviewed`. A trusted reviewer reapplies it only
+after verifying this evidence and the exact proposed tip.
