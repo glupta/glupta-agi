@@ -6,9 +6,9 @@ on:
 
 permissions:
   contents: read
-  issues: read
-  pull-requests: read
+  issues: write
+  pull-requests: write
 
 jobs:
   policy:
-    uses: glupta/dev-meta/.github/workflows/studio-policy.yml@cd4a9880fdceeb6e6a49464885338c4500f0f0c0
+    uses: glupta/dev-meta/.github/workflows/studio-policy.yml@0ee6210095bb738bfc7f074902cfd73741888c84
